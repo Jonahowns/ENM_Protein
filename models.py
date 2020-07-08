@@ -257,9 +257,9 @@ class ANM(object):
             U, w, Vt = u_gpu.get(), s_gpu.get(), vh_gpu.get()
         else:
             U, w, Vt = scipy.linalg.svd(hess, full_matrices=False)
-
+        print(w)
         S = scipy.linalg.diagsvd(w, len(w), len(w))
-        tol = 1e-6
+        tol = 1e-4
         singular = w < tol
         invw = 1 / w
         invw[singular] = 0.
@@ -295,28 +295,25 @@ class ANM(object):
             self.msds.append(self.kb * self.T * (invhess[3 * i, 3 * i] + invhess[3 * i + 1, 3 * i + 1] +
                                                  invhess[3 * i + 2, 3 * i + 2]))
 
-    def calc_bfactors(self):
+    def anm_calc_bfactors(self):
         self.ana_bfactors = []
-        self.ana_bfactors = [self.bconv*x for x in self.msds]
+        self.ana_bfactors = [self.bconv*x*1/self.ana_gamma for x in self.msds]
 
     def calc_ANM_sc(self, spring_constant_matrix, cuda=False):
         self.calc_dist_matrix()
         hess = self.calc_hess_fast_sc(spring_constant_matrix)
         iH = self.calc_inv_Hess(hess, cuda=cuda)
         self.calc_msds(iH)
-        self.calc_bfactors()
+        self.anm_calc_bfactors()
 
     def calc_ANM_unitary(self, cuda=False):
         self.calc_dist_matrix()
-        # print(self.distance_matrix[1])
         hess = self.calc_hess_fast_unitary()
-        print(hess[0], hess[3])
         iH = self.calc_inv_Hess(hess, cuda=cuda)
-        print(iH[0])
+
         self.calc_msds(iH)
         print(self.msds)
         self.ANM_fit_to_exp()
-        self.calc_bfactors()
 
     def anm_compare_bfactors(self, outfile):
         if self.ana_bfactors:
@@ -336,6 +333,7 @@ class MVPANM(ANM):
         self.scale_resolution = scale_resolution
         self.k_factor = k_factor
         self.alg = algorithim
+        # self.cutoff = cutoff
 
         self.spring_constant_matrix = []
         # Rigidity Functions, only calculate once and unique to each system
@@ -393,7 +391,7 @@ class MVPANM(ANM):
         return (1. + self.mu_s[i]) * (1. + self.mu_s[j])
 
     def mvp_compute_gamma_2(self, i, j):
-        indx = i * self.n + j
+        indx = i * self.cc + j
         return self.kernels[indx]
 
     def mvp_compute_spring_constants(self):
@@ -418,38 +416,39 @@ class MVPANM(ANM):
                     self.spring_constant_matrix[i, j] = 0
 
     def mvp_calc_bfactors(self, cuda=False):
-        self.calc_ANM_sc(self.spring_constant_matrix, cuda=cuda)
+        self.calc_dist_matrix()
+        hess = self.calc_hess_fast_sc(self.spring_constant_matrix)
+        iH = self.calc_inv_Hess(hess, cuda=cuda)
+        self.calc_msds(iH)
+        self.ana_bfactors = [self.bconv * x for x in self.msds]
 
     def mvp_fit_to_exp(self):
-        if self.ana_bfactors:
-            try:
-                from sklearn.linear_model import LinearRegression
-            except ImportError:
-                print('Check that sklearn module is installed')
-                sys.exit()
-            flex_data = np.asarray(self.ana_bfactors)
-            exp_data = np.asarray(self.exp_bfactors)
-            X = flex_data.reshape(-1, 1)
-            Y = exp_data
-            fitting = LinearRegression(fit_intercept=False)
-            fitting.fit(X, Y)
-            slope = fitting.coef_
-            self.spring_constant_matrix /= slope
-            self.ana_bfactors *= slope
-        else:
-            print("Must Calculate mvp B factors prior to Fitting")
+        try:
+            from sklearn.linear_model import LinearRegression
+        except ImportError:
+            print('Check that sklearn module is installed')
+            sys.exit()
+        print(self.ana_bfactors)
+        flex_data = np.asarray(self.ana_bfactors)
+        exp_data = np.asarray(self.exp_bfactors)
+        X = flex_data.reshape(-1, 1)
+        Y = exp_data
+        print(flex_data)
+        fitting = LinearRegression(fit_intercept=False)
+        fitting.fit(X, Y)
+        slope = fitting.coef_
+        self.spring_constant_matrix /= slope
+        self.ana_bfactors *= slope
 
     def mvp_theor_bfactors(self, outfile):
-        if self.ana_bfactors:
-            free_compare(outfile, self.exp_bfactors, self.ana_bfactors,
+        free_compare(outfile, self.exp_bfactors, self.ana_bfactors,
                          legends=['Experimental  (PDB)', 'Analytical (MVP)'])
-        else:
-            print('Analytical B Factors have not been Calculated')
 
     def calc_mvp(self, cuda=False):
         self.mvp_compute_all_rigidity_functions()
         self.mvp_compute_spring_constants()
         self.mvp_calc_bfactors(cuda=cuda)
+        print(self.spring_constant_matrix)
         self.mvp_fit_to_exp()
 
 
