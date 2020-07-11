@@ -3,6 +3,7 @@ import Bio.PDB
 import scipy.linalg
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.linalg as la
 import math
 import sys
 import os
@@ -41,10 +42,15 @@ conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 
         'MET': 'M'}
 
 
-def get_pdb_info(pdb_code, pdb_filename, returntype=1):
-    structure = Bio.PDB.PDBParser().get_structure(pdb_code, pdb_filename)
+def get_pdb_info(pdb_file, returntype=1, multimodel='False'):
+    if "/" in pdb_file:
+        pdbid = pdb_file.rsplit('/', 1)[1].split('.')[0]
+    else:
+        pdbid = pdb_file.split('.')[0]
+    structure = Bio.PDB.PDBParser().get_structure(pdbid, pdb_file)
     model = structure[0]
-
+    if multimodel:
+        model = Bio.PDB.Selection.unfold_entities(structure, 'C')
     chainids, chain_coords, chain_seqs, chain_bfactors = [], [], [], []
     # iterate through chains in pdb
     for chain in model:
@@ -56,11 +62,12 @@ def get_pdb_info(pdb_code, pdb_filename, returntype=1):
         # iterate through residues
         for residue in chain.get_residues():
             tags = residue.get_full_id()
+            # print(tags)
             if tags[3][0] == " ":
                 # Get Residues one letter code
                 onelettercode = conv[residue.get_resname()]
                 # get residue number and identity per chain
-                chain_seqs.append((tags[0], onelettercode))
+                chain_seqs.append((tags[2], onelettercode))
                 atoms = residue.get_atoms()
                 for atom in atoms:
                     if atom.get_id() == 'CA':
@@ -80,6 +87,8 @@ def get_pdb_info(pdb_code, pdb_filename, returntype=1):
         return chain_coords, chainids, chain_seqs, chain_bfactors
     elif returntype == 2:
         return chain_coords, chain_bfactors
+    elif returntype == 3:
+        return chain_seqs
 
 def free_compare(out, *data, legends=[]):
     cs = ['r', 'c', 'b']
@@ -272,6 +281,13 @@ class ANM(object):
     def load_inverse_Hessian(self, infile):
         invhess = np.load(infile)
         return invhess
+
+    #finds closest particles to the coordindx
+    # def find_nearest_particles(self, coordindx, cutoff):
+    #
+    #
+    # def anm_remove_peak(self):
+    #     hpeak = np.argmax(np.asarray(self.msds))
 
     def ANM_search(self, br, er, step):
         r = []
@@ -486,8 +502,9 @@ class HANM(ANM):
             hess[3 * i + 2, 3 * i + 2] += restraint_force_constants[i]
 
     def hanm_calc_bond_fluctuations(self, hess, cuda=False):
-        if not self.cuda_initialized:
-            self.init_cuda()
+        if cuda:
+            if not self.cuda_initialized:
+                self.init_cuda()
         if cuda:
             thess = np.asarray(hess, dtype=np.float32, order='C')
             cu_hess = gpuarray.to_gpu(thess)
@@ -531,13 +548,13 @@ class HANM(ANM):
                             bond_fluc[i, j] += np.sum(p) ** 2. / evals[k]
         return bcal, bond_fluc
 
-    def hanm_nma(self, fc, fc_res, cuda=True):
+    def hanm_nma(self, fc, fc_res, cuda=False):
         hess = self.calc_hess_fast_sc(fc)
         self.hanm_add_restraints(hess, fc_res)
         bcal, bond_fluc = self.hanm_calc_bond_fluctuations(hess, cuda=cuda)
         return bcal, bond_fluc
 
-    def routine(self, cuda=True):
+    def routine(self, cuda=False):
 
         mthreshold1 = 0.005  # relative
         mthreshold2 = 0.01  # absolute
@@ -549,8 +566,9 @@ class HANM(ANM):
         fc_res0 = [0. for x in range(self.cc)]
         sc_mat_tmp = np.full((self.cc, self.cc), self.ana_gamma)
 
-        if not self.cuda_initialized:
-            self.init_cuda()
+        if cuda:
+            if not self.cuda_initialized:
+                self.init_cuda()
 
         bcal, bond_fluc = self.hanm_nma(sc_mat_tmp, fc_res0, cuda=cuda)
 
@@ -710,6 +728,7 @@ class protein:
     def WriteParFile(self, pottype='s', potential=5.0):
         make = open(self.parfile, 'w')
         self.pi = len(self.coord)  # Particle Index for range operations
+        print(self.coord.shape, len(self.coord))
         print(self.pi)
         make.write(str(len(self.coord)))
         make.write(n)
