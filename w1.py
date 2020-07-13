@@ -1,16 +1,8 @@
-
-
 import models as m
 import mod_protein as mod
 import numpy as np
-from pycuda import autoinit
-from pycuda import gpuarray
-import pycuda.driver as cuda
-import skcuda.linalg as cuda_la
-import skcuda.misc as cuda_misc
 
-cuda_misc.init()
-cuda_la.init()
+
 
 wdir = '/home/jonah/Dropbox (ASU)/Projects/COV/'
 
@@ -29,8 +21,8 @@ ex_bfacts = m.flatten(chain_exp_bfacts)
 # del fcoord[-1]
 
 anm = m.MVPANM(fcoord, ex_bfacts, T=300, cutoff=15, scale_resolution=25, k_factor=4)
-anm.calc_mvp(cuda=False)
-anm.mvp_theor_bfactors('rnap_mvp_mod_trial.png')
+anm.calc_mvp(cuda=True)
+anm.mvp_theor_bfactors('rnap_cuda_mvp_mod_trial.png')
 
 # hanm = m.HANM(fcoord, ex_bfacts, mcycles=1, ncycles=1, scale_factor=0.6)
 # hanm.routine(cuda=False)
