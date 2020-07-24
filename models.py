@@ -7,6 +7,7 @@ import numpy.linalg as la
 import math
 import sys
 import os
+import copy
 
 #Comment this block out if you don't need CUDA support
 from pycuda import autoinit
@@ -314,7 +315,7 @@ class ANM(object):
         hess = self.calc_hess_fast_sc(spring_constant_matrix)
         iH = self.calc_inv_Hess(hess, cuda=cuda)
         self.calc_msds(iH)
-        self.anm_calc_bfactors()
+        self.ana_bfactors = [self.bconv * x for x in self.msds]
 
     def calc_ANM_unitary(self, cuda=False):
         self.calc_dist_matrix()
@@ -331,6 +332,13 @@ class ANM(object):
                          legends=['Experimental  (PDB)', 'Analytical (ANM)' + str(round(self.ana_gamma*100, 3))+ "(pN/A)"])
         else:
             print('Analytical B Factors have not been Calculated')
+
+    def simplifty_2d_matrix(self, matrix, tol=0.001):
+        print(np.shape(matrix))
+        low_val_indices = matrix < tol
+        newmatrix = copy.deepcopy(matrix)
+        newmatrix[low_val_indices] = 0.
+        return newmatrix
 
 
 #Implemented this paper's idea https://pubs-rsc-org.ezproxy1.lib.asu.edu/en/content/articlepdf/2018/cp/c7cp07177a
@@ -461,6 +469,140 @@ class ANM(object):
 #         print(self.spring_constant_matrix)
 #         self.mvp_fit_to_exp()
 
+class kernel():
+    def __init__(self, id):
+        self.id = id
+        #bfactor fitting coefficients
+        self.fitting_a = 0
+        # Main Storage
+        self.kerns = []
+        self.mu = []
+        self.cutoff = 0
+
+    def algorithim(self, dist, scale_resolution, k_factor, alg='ge'):
+        # Can choose between Generalized Exponential and Generalized Lorentz Function
+        def gen_exp(dist):
+            return math.exp(-1 * (dist / scale_resolution) ** k_factor)
+
+        def gen_lor(dist):
+            return 1. / (1. + (dist / scale_resolution) ** k_factor)
+
+        if alg == 'ge':
+            return gen_exp(dist)
+        elif alg == 'gl':
+            return gen_lor(dist)
+
+    def construct_kernel(self, coordinates, cutoff, scale_resolution, k_factor, alg='ge'):
+        self.kerns = []
+        self.mu = []
+        self.cutoff = cutoff
+        cc = len(coordinates)
+        for i in range(cc):
+            ker_i = 0.
+            for j in range(cc):
+                d = dist(coordinates, i, j)
+                if cutoff > 0. and d <= cutoff:
+                    ker = self.algorithim(d, scale_resolution, k_factor, alg=alg)
+                elif cutoff > 0. and d > cutoff:
+                    ker = 0.
+                else:
+                    ker = self.algorithim(d, scale_resolution, k_factor, alg=alg)
+                self.kerns.append(ker)
+                ker_i += ker
+            self.mu.append(ker_i)
+
+        # replace ii with sum
+        for i in range(cc):
+            indx = i * cc + i
+            #Negative Sign Yay or Nay? Try Nay first
+            self.kerns[indx] = self.mu[i]
+
+    def shift_mu(self, shift):
+        self.mu = [x * shift for x in self.mu]
+
+    def shift_kerns(self, shift):
+        self.kerns = [x * shift for x in self.kerns]
+
+class Multiscale_ANM(ANM):
+    def __init__(self, coord, exp_bfactors, T=300):
+        super().__init__(coord, exp_bfactors, T=T)
+        self.model_id = 'mANM'
+        self.kernels = []
+        self.inv_bfactors = [1./x for x in exp_bfactors]
+        self.spring_constant_matrix = []
+
+    def make_kernel(self, id, cutoff, scale_resolution, k_factor, alg='ge'):
+        k = kernel(id)
+        k.construct_kernel(self.coord, cutoff, scale_resolution, k_factor, alg=alg)
+        self.kernels.append(k)
+
+
+    def fit_kernels(self):
+        raw = [k.mu for k in self.kernels]
+        try:
+            from sklearn.linear_model import LinearRegression
+        except ImportError:
+            print('Check that sklearn module is installed')
+            sys.exit()
+        flex_data = np.asarray(raw)
+        exp_data = np.asarray(self.inv_bfactors)
+        X = flex_data.transpose()
+        Y = exp_data
+        print(flex_data)
+        fitting = LinearRegression(fit_intercept=False)
+        fitting.fit(X, Y)
+        slope = fitting.coef_
+        print(slope)
+        for i in range(len(self.kernels)):
+            self.kernels[i].fitting_a = slope[i]
+
+    def calc_msds(self, invhess):
+        self.msds = []
+        for i in range(self.cc):
+            self.msds.append(invhess[3 * i, 3 * i] + invhess[3 * i + 1, 3 * i + 1] +
+                             invhess[3 * i + 2, 3 * i + 2])
+
+    def calc_ANM_sc(self, spring_constant_matrix, cuda=False):
+        self.calc_dist_matrix()
+        hess = self.calc_hess_fast_sc(spring_constant_matrix)
+        iH = self.calc_inv_Hess(hess, cuda=cuda)
+        self.calc_msds(iH)
+        self.ana_bfactors = [x * self.ibconv for x in self.msds]
+
+
+    def mANM_theor_bfactors(self, outfile, cuda=False):
+        for k in self.kernels:
+            print(k.kerns[0])
+            k.shift_kerns(k.fitting_a)
+            print(k.kerns[0])
+
+        self.cutoff = max([k.cutoff for k in self.kernels])
+        print(self.cutoff)
+
+        spring_constant_total = np.full((self.cc, self.cc), 0.)
+        for i in range(self.cc):
+            for j in range(self.cc):
+                if i==j:
+                    k_ij = 1.
+                    spring_constant_total[i, j] = k_ij
+                elif i>j:
+                    continue
+                else:
+                    k_ij = 0.
+                    for k in self.kernels:
+                        k_ij += k.kerns[i * self.cc + j]
+                    spring_constant_total[i, j] = k_ij
+                    spring_constant_total[j, i] = k_ij
+        self.spring_constant_matrix = spring_constant_total
+
+        self.calc_ANM_sc(self.spring_constant_matrix, cuda=cuda)
+        self.anm_compare_bfactors(outfile)
+
+
+
+
+
+
 
 
 class HANM(ANM):
@@ -557,11 +699,6 @@ class HANM(ANM):
         fc_res0 = [0. for x in range(self.cc)]
         sc_mat_tmp = np.full((self.cc, self.cc), self.ana_gamma)
 
-        if cuda:
-            if not self.cuda_initialized:
-                print('CUDA must be initalized in the model constructor')
-                sys.exit()
-
         bcal, bond_fluc = self.hanm_nma(sc_mat_tmp, fc_res0, cuda=cuda)
 
         for i in range(self.mcycles):
@@ -640,11 +777,12 @@ n='\n'
 
 class protein:
     def __init__(self, pdbfile, cutoff=15, pottype='s', potential=5.0, offset_indx=0, strand_offset=0,
-                 diff_chains=True, import_sc=False, spring_constant_matrix=[]):
+                 diff_chains=True, import_sc=False, spring_constant_matrix=[], multimodel=False):
         self.su = 8.518
         self.boxsize = 0
         self.diff_chains = diff_chains
         self.pi = 0
+        self.multimodel = multimodel
 
         if "/" in pdbfile:
             pdbid = pdbfile.rsplit('/', 1)[1].split('.')[0]
@@ -660,6 +798,7 @@ class protein:
         self.sim_force_const = .05709
         self.pottype = pottype
         self.import_sc = import_sc
+
         if import_sc:
             self.spring_constant_matrix = spring_constant_matrix
             self.potential = 0.
@@ -694,6 +833,8 @@ class protein:
     def getalphacarbons(self, pdbid, pdbfile):
         structure = Bio.PDB.PDBParser().get_structure(pdbid, pdbfile)
         model = structure[0]
+        if self.multimodel:
+            model = Bio.PDB.Selection.unfold_entities(structure, 'C')
         # chain index, residue index, residue identitiy, CA coordinates
         cindx, rindx, rids, coord = [], [], [], []
         if len(model) == 1:
@@ -826,10 +967,12 @@ class protein:
 
 
 
-def export_to_simulation(model, pdbfile):
+def export_to_simulation(model, pdbfile, multimodel=False):
     if model.model_id == 'ANM':
-        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma)
+        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma, multimodel=multimodel)
         p.WriteSimFiles()
-    elif model.model_id == 'HANM' or model.model_id == 'MVP':
-        p = protein(pdbfile, cutoff=model.cutoff, import_sc=True, spring_constant_matrix=model.spring_constant_matrix)
+    elif model.model_id == 'HANM' or model.model_id == 'MVP' or model.model_id == 'mANM':
+        p = protein(pdbfile, cutoff=model.cutoff, import_sc=True, spring_constant_matrix=model.spring_constant_matrix, multimodel=multimodel)
         p.WriteSimFiles()
+    else:
+        print('Model Type', model.model_id, 'is not supported')

@@ -20,14 +20,14 @@ ex_bfacts = m.flatten(chain_exp_bfacts)
 # print(fcoord.shape)
 # del fcoord[-1]
 
-anm = m.MVPANM(fcoord, ex_bfacts, T=300, cutoff=15, scale_resolution=25, k_factor=4)
-anm.calc_mvp(cuda=True)
-anm.mvp_theor_bfactors('rnap_cuda_mvp_mod_trial.png')
+# anm = m.MVPANM(fcoord, ex_bfacts, T=300, cutoff=15, scale_resolution=25, k_factor=4)
+# anm.calc_mvp(cuda=True)
+# anm.mvp_theor_bfactors('rnap_cuda_mvp_mod_trial.png')
 
-# hanm = m.HANM(fcoord, ex_bfacts, mcycles=1, ncycles=1, scale_factor=0.6)
-# hanm.routine(cuda=False)
-# hanm.hanm_theor_bfactors('rnap_hanm_trial.png')
-# m.export_to_simulation(hanm, 'RNAP_MOD.pdb')
+hanm = m.HANM(fcoord, ex_bfacts, mcycles=5, ncycles=6, scale_factor=0.6, cutoff=18)
+hanm.routine(cuda=True)
+hanm.hanm_theor_bfactors('rnap_hanm_trial.png')
+m.export_to_simulation(hanm, 'RNAP_MOD.pdb')
 
 
 # mvp = m.MVPANM(fcoord, ex_bfacts, T=300, cutoff=20, scale_resolution=30, k_factor=5)
