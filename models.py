@@ -52,13 +52,16 @@ conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 
         'MET': 'M'}
 
 
-def get_pdb_info(pdb_file, returntype=1, multimodel='False'):
+def get_pdb_info(pdb_file, returntype=1, multimodel='False', orientations=False):
     if "/" in pdb_file:
         pdbid = pdb_file.rsplit('/', 1)[1].split('.')[0]
     else:
         pdbid = pdb_file.split('.')[0]
     structure = Bio.PDB.PDBParser().get_structure(pdbid, pdb_file)
     model = structure[0]
+    # Normal Vectors Calculated only if Orientations=True
+    N_Vectors = []
+    # Chains aren't in same PDB model but rather different models
     if multimodel:
         model = Bio.PDB.Selection.unfold_entities(structure, 'C')
     chainids, chain_coords, chain_seqs, chain_bfactors = [], [], [], []
@@ -79,6 +82,8 @@ def get_pdb_info(pdb_file, returntype=1, multimodel='False'):
                 # get residue number and identity per chain
                 chain_seqs.append((tags[2], onelettercode))
                 atoms = residue.get_atoms()
+                # Center of Mass Used only if Orientation=True
+                com = np.full(3, 0.0)
                 for atom in atoms:
                     if atom.get_id() == 'CA':
                         coordinates = atom.get_coord()
@@ -86,6 +91,17 @@ def get_pdb_info(pdb_file, returntype=1, multimodel='False'):
                         bfacttmp.append(bfactor)
                         # Add coordinates to tmp container
                         coordtmp.append(coordinates)
+                    if orientations:
+                        if atom.get_id() != 'N' or atom.get_id() != 'C' or atom.get_id() != 'O':
+                            com += atom.get_coord()
+                if orientations:
+                    if np.sum(com) != 0.:
+                        normal_vector = np.divide(com, np.sqrt(np.sum(com ** 2)))
+                        N_Vectors.append(normal_vector)
+                    else:
+                        N_Vectors.append(np.asarray([0., 0., 0.]))
+
+
         # Before next chain add all of this chain's coordinates to chain_coords
         chain_coords.append(coordtmp)
         chain_bfactors.append(bfacttmp)
@@ -334,11 +350,11 @@ class ANM(object):
             print('Analytical B Factors have not been Calculated')
 
     def simplifty_2d_matrix(self, matrix, tol=0.001):
-        print(np.shape(matrix))
-        low_val_indices = matrix < tol
-        newmatrix = copy.deepcopy(matrix)
-        newmatrix[low_val_indices] = 0.
-        return newmatrix
+        # print(np.shape(matrix))
+        matrix[matrix < (tol/self.sim_force_const)] = 0.
+        # newmatrix = copy.deepcopy(matrix)
+        # newmatrix[low_val_indices] = 0.
+        return matrix
 
 
 #Implemented this paper's idea https://pubs-rsc-org.ezproxy1.lib.asu.edu/en/content/articlepdf/2018/cp/c7cp07177a
@@ -600,8 +616,16 @@ class Multiscale_ANM(ANM):
 
 
 
+class ac_ANM(ANM):
+    def __init__(self, coord, exp_bfactors, T=300):
+        super().__init__(coord, exp_bfactors, T=T)
+        self.model_id = 'mANM'
+        self.kernels = []
+        self.ana_bend_gamma = 0
 
+    def calc_normal_vectors(self):
 
+    def calc_bend_hess(self):
 
 
 
