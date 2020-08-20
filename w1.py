@@ -6,7 +6,7 @@ import numpy as np
 
 wdir = '/home/jonah/Dropbox (ASU)/Projects/COV/'
 
-chain_coord, chain_exp_bfacts = m.get_pdb_info('RNAP_MOD.pdb', returntype=2, multimodel=True)
+chain_coord, chain_exp_bfacts, normal_vectors = m.get_pdb_info('RNAP_MOD.pdb', returntype=4, multimodel=True, orientations=True)
 fcoord = np.asarray(m.flatten(chain_coord))
 ex_bfacts = m.flatten(chain_exp_bfacts)
 # print(fcoord)
@@ -24,10 +24,18 @@ ex_bfacts = m.flatten(chain_exp_bfacts)
 # anm.calc_mvp(cuda=True)
 # anm.mvp_theor_bfactors('rnap_cuda_mvp_mod_trial.png')
 
-hanm = m.HANM(fcoord, ex_bfacts, mcycles=5, ncycles=6, scale_factor=0.6, cutoff=18)
-hanm.routine(cuda=True)
-hanm.hanm_theor_bfactors('rnap_hanm_trial.png')
-m.export_to_simulation(hanm, 'RNAP_MOD.pdb')
+anmt = m.ANM_wT(fcoord, normal_vectors, ex_bfacts, T=300)
+anmt.calc_a3s()
+
+p = m.protein('RNAP_MOD.pdb', cutoff=10, pottype='s', potential=5.0, Angle_Constraint=True, a1s=anmt.normal_vectors, a3s=anmt.a3s, multimodel=True)
+p.WriteSimFiles()
+
+
+
+
+# hanm.routine(cuda=True)
+# hanm.hanm_theor_bfactors('rnap_hanm_trial.png')
+# m.export_to_simulation(hanm, 'RNAP_MOD.pdb')
 
 
 # mvp = m.MVPANM(fcoord, ex_bfacts, T=300, cutoff=20, scale_resolution=30, k_factor=5)

@@ -1738,3 +1738,132 @@ tip_check('1bu4.pdb', '1bu4_check.png')
 # # free_compare('xvcheck.png', x1, x2, legends=['prior','post'])
 
 # bt = BfactorSolver ('j', [0, 0, 0], 300, [0,0,0], load_inv_hess=False, solve=False, load_test_sys=True)
+
+
+#Implemented this paper's idea https://pubs-rsc-org.ezproxy1.lib.asu.edu/en/content/articlepdf/2018/cp/c7cp07177a
+#Very Basic Implementation for C-A coarse graining
+# class MVPANM(ANM):
+#     def __init__(self, coord, exp_bfactors, cutoff=15, scale_resolution=15, k_factor=3, algorithim='ge', T=300):
+#         super().__init__(coord, exp_bfactors, T=T, cutoff=cutoff)
+#         # weight factor might change later we'll see
+#         self.w = 1.
+#         self.scale_resolution = scale_resolution
+#         self.k_factor = k_factor
+#         self.alg = algorithim
+#         # self.cutoff = cutoff
+#
+#         self.spring_constant_matrix = []
+#         # Rigidity Functions, only calculate once and unique to each system
+#         self.kernels = []
+#         self.mu = []
+#         self.mu_s = []
+#         self.model_id = 'MVP'
+#
+#     def algorithim(self, dist):
+#         # Can choose between Generalized Exponential and Generalized Lorentz Function
+#         def gen_exp(dist):
+#             return math.exp((-1. * dist / self.scale_resolution)) ** self.k_factor
+#
+#         def gen_lor(dist):
+#             return 1. / (1. + (dist / self.scale_resolution) ** self.k_factor)
+#
+#         if self.alg == 'ge':
+#             return gen_exp(dist)
+#         elif self.alg == 'gl':
+#             return gen_lor(dist)
+#
+#     def mvp_compute_all_rigidity_functions(self):
+#         self.kernels = []
+#         self.mu = []
+#         self.mu_s = []
+#         for i in range(self.cc):
+#             ker_i = 0.
+#             for j in range(self.cc):
+#                 d = dist(self.coord, i, j)
+#                 if self.cutoff > 0. and d <= self.cutoff:
+#                     ker = self.algorithim(d)
+#                 elif self.cutoff > 0. and d > self.cutoff:
+#                     ker = 0.
+#                 else:
+#                     ker = self.algorithim(d)
+#                 self.kernels.append(ker)
+#                 ker_i += ker * self.w
+#             self.mu.append(ker_i)
+#
+#         # replace ii with sum
+#         for i in range(self.cc):
+#             indx = i * self.cc + i
+#             self.kernels[indx] = -1 * self.mu[i]
+#
+#         # Normalized density funciton
+#         mu_s = []
+#         min_mu = min(self.mu)
+#         max_mu = max(self.mu)
+#         for i in range(self.cc):
+#             mu_normed = (self.mu[i] - min_mu) / (max_mu - min_mu)
+#             mu_s.append(mu_normed)
+#         self.mu_s = mu_s
+#
+#     def mvp_compute_gamma_1(self, i, j):
+#         return (1. + self.mu_s[i]) * (1. + self.mu_s[j])
+#
+#     def mvp_compute_gamma_2(self, i, j):
+#         indx = i * self.cc + j
+#         return self.kernels[indx]
+#
+#     def mvp_compute_spring_constants(self):
+#         if self.kernels and self.mu and self.mu_s:
+#             sc_matrix = np.full((self.cc, self.cc), 0.0)
+#             for i in range(self.cc):
+#                 for j in range(self.cc):
+#                     if i == j:
+#                         spring_constant_ij = 1.
+#                     else:
+#                         spring_constant_ij = self.mvp_compute_gamma_1(i, j) * self.mvp_compute_gamma_2(i, j)
+#                     sc_matrix[i, j] = spring_constant_ij
+#             self.spring_constant_matrix = sc_matrix
+#         else:
+#             print('Must Compute Rigidity Functions Prior to Spring Constants')
+#
+#     def simplify_matrix(self, percentile):
+#         cut_val = np.percentile(self.spring_constant_matrix, percentile)
+#         for i in range(self.cc):
+#             for j in range(self.cc):
+#                 if self.spring_constant_matrix[i, j] < cut_val:
+#                     self.spring_constant_matrix[i, j] = 0
+#
+#     def mvp_calc_bfactors(self, cuda=False):
+#         self.calc_dist_matrix()
+#         hess = self.calc_hess_fast_sc(self.spring_constant_matrix)
+#         iH = self.calc_inv_Hess(hess, cuda=cuda)
+#         self.calc_msds(iH)
+#         self.ana_bfactors = [self.bconv * x for x in self.msds]
+#
+#     def mvp_fit_to_exp(self):
+#         try:
+#             from sklearn.linear_model import LinearRegression
+#         except ImportError:
+#             print('Check that sklearn module is installed')
+#             sys.exit()
+#         print(self.ana_bfactors)
+#         flex_data = np.asarray(self.ana_bfactors)
+#         exp_data = np.asarray(self.exp_bfactors)
+#         X = flex_data.reshape(-1, 1)
+#         Y = exp_data
+#         print(flex_data)
+#         fitting = LinearRegression(fit_intercept=False)
+#         fitting.fit(X, Y)
+#         slope = fitting.coef_
+#         self.spring_constant_matrix /= slope
+#         self.ana_bfactors *= slope
+#
+#     def mvp_theor_bfactors(self, outfile):
+#         free_compare(outfile, self.exp_bfactors, self.ana_bfactors,
+#                          legends=['Experimental  (PDB)', 'Analytical (MVP)'])
+#
+#     def calc_mvp(self, cuda=False):
+#         self.mvp_compute_all_rigidity_functions()
+#         self.mvp_compute_spring_constants()
+#         self.mvp_calc_bfactors(cuda=cuda)
+#         print(self.spring_constant_matrix)
+#         self.mvp_fit_to_exp()
