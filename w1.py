@@ -24,11 +24,19 @@ ex_bfacts = m.flatten(chain_exp_bfacts)
 # anm.calc_mvp(cuda=True)
 # anm.mvp_theor_bfactors('rnap_cuda_mvp_mod_trial.png')
 
-anmt = m.ANM_wT(fcoord, normal_vectors, ex_bfacts, T=300)
+anmt = m.ANMT(fcoord, normal_vectors, ex_bfacts, T=300)
 anmt.calc_a3s()
+s2msd, s2b = m.load_sim_rmsds_from_file('rnap10_25devs.json')
+s3msd, s3b = m.load_sim_rmsds_from_file('rnapt10_50devs.json')
+s4msd, s4b = m.load_sim_rmsds_from_file('rnapt10_150devs.json')
+s5msd, s5b = m.load_sim_rmsds_from_file('rnapt10_150devs2.json')
+smsd, sb = m.load_sim_rmsds_from_file('rnapt10devs.json')
+m.free_compare('rnapttrial.png', sb, s2b, s3b, ex_bfacts, legends=['sim15', 'sim25', 'sim50', 'exp'], title='RNAPT10trial')
+m.free_compare('rnapttrial_j50.png', s3b, s5b, ex_bfacts, legends=['sim50', 'sim150', 'exp'], title='RNAPT10trial')
 
-p = m.protein('RNAP_MOD.pdb', cutoff=10, pottype='s', potential=5.0, Angle_Constraint=True, a1s=anmt.normal_vectors, a3s=anmt.a3s, multimodel=True)
-p.WriteSimFiles()
+
+# p = m.protein('RNAP_MOD.pdb', cutoff=10, pottype='s', potential=5.0, Angle_Constraint=True, a1s=anmt.normal_vectors, a3s=anmt.a3s, multimodel=True)
+# p.WriteSimFiles()
 
 
 

@@ -7,16 +7,28 @@ import numpy.linalg as la
 import math
 import sys
 import os
+
 import copy
 
-#Comment this block out if you don't need CUDA support
-from pycuda import autoinit
-from pycuda import gpuarray
-import pycuda.driver as cuda
-import skcuda.linalg as cuda_la
-import skcuda.misc as cuda_misc
-cuda_misc.init()
-cuda_la.init()
+
+#Set cuda_support to False if CUDA if not needed
+#To enable cuda support must install pycuda and skcuda
+#AND have LD_LIBRARY_PATH variable set correctly
+#might as well set PATH while you're at it
+
+# Ubuntu Example
+# ex. PATH=/usr/local/cuda/bin
+# ex. LD_LIBRARY_PATH=/usr/local/cuda/lib64
+cuda_support = False #Enable CUDA operations by loading CUDA drivers and initializing GPU
+
+if cuda_support:
+    from pycuda import autoinit
+    from pycuda import gpuarray
+    import pycuda.driver as cuda
+    import skcuda.linalg as cuda_la
+    import skcuda.misc as cuda_misc
+    cuda_misc.init()
+    cuda_la.init()
 
 
 # Helper Functions
@@ -46,7 +58,33 @@ def divide_list(list, piecenum):
             yield (sublist)
 
 def normalize_vector(v):
-    return np.divide(v, np.sqrt(np.sum(v**2)))
+    if v[0] == 0. and v[1] == 0. and v[2] == 0.:
+        return v
+    else:
+        return np.divide(v, np.sqrt(np.sum(v**2)))
+
+def map_bfactors(adjseq, exp_bfacts, fillvalue=1.):
+    bfmap = []
+    count = 0
+    for xid, x in enumerate(list(adjseq)):
+        if x == '-':
+            count += 1
+            bfmap.append(fillvalue)
+        else:
+            bfmap.append(exp_bfacts[xid - count])
+    return bfmap
+
+
+def read_seqfile(seqfile):
+    o = open(seqfile, 'r')
+    data = o.read()
+    o.close()
+    data.split('\n')
+    datastr = ''.join(data)
+    newdata = [x for x in list(datastr) if x.isalpha() or x =='-']
+    fullseq = ''.join(newdata)
+    return fullseq
+
 
 
 conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 'PRO': 'P', 'THR': 'T', 'PHE': 'F',
@@ -54,20 +92,25 @@ conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 
         'GLY': 'G', 'HIS': 'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W', 'ALA': 'A', 'VAL': 'V', 'GLU': 'E', 'TYR': 'Y',
         'MET': 'M'}
 
+# Gets all chains in PDB File
+# Return Types
 
-def get_pdb_info(pdb_file, returntype=1, multimodel='False', orientations=False):
+def get_pdb_info(pdb_file, returntype='cb'):
+    print("INFO: Don't worry about Discontinuous chain warnings!")
     if "/" in pdb_file:
         pdbid = pdb_file.rsplit('/', 1)[1].split('.')[0]
     else:
         pdbid = pdb_file.split('.')[0]
     structure = Bio.PDB.PDBParser().get_structure(pdbid, pdb_file)
-    model = structure[0]
-    # Normal Vectors Calculated only if Orientations=True
+
+    #Get all chains in file
+    model = Bio.PDB.Selection.unfold_entities(structure, 'C')
+
+    #orientation vector container
     tmp_N_vectors = []
-    # Chains aren't in same PDB model but rather different models
-    if multimodel:
-        model = Bio.PDB.Selection.unfold_entities(structure, 'C')
-    chainids, chain_coords, chain_seqs, chain_bfactors = [], [], [], []
+
+    chainids, chain_coords, chain_seqs, chain_bfactors, chainbounds = [], [], [], [], {}
+
     # iterate through chains in pdb
     for chain in model:
         # Add chain
@@ -75,6 +118,8 @@ def get_pdb_info(pdb_file, returntype=1, multimodel='False', orientations=False)
         # empty coordinates each iteration to separate by chain
         coordtmp = []
         bfacttmp = []
+        chainseqtmp = []
+        chainboundstmp = []
         # iterate through residues
         for residue in chain.get_residues():
             tags = residue.get_full_id()
@@ -83,10 +128,12 @@ def get_pdb_info(pdb_file, returntype=1, multimodel='False', orientations=False)
                 # Get Residues one letter code
                 onelettercode = conv[residue.get_resname()]
                 # get residue number and identity per chain
-                chain_seqs.append((tags[2], onelettercode))
+                chainseqtmp.append((tags[2], onelettercode))
+                chainboundstmp.append(int(tags[3][1]))
                 atoms = residue.get_atoms()
                 # Center of Mass Used only if Orientation=True
                 com = np.full(3, 0.0)
+                count = 0
                 for atom in atoms:
                     if atom.get_id() == 'CA':
                         coordinates = atom.get_coord()
@@ -94,65 +141,129 @@ def get_pdb_info(pdb_file, returntype=1, multimodel='False', orientations=False)
                         bfacttmp.append(bfactor)
                         # Add coordinates to tmp container
                         coordtmp.append(coordinates)
-                    if orientations:
                         if atom.get_id() != 'N' or atom.get_id() != 'C' or atom.get_id() != 'O':
+                            count += 1
                             com += atom.get_coord()
-                if orientations:
-                    if np.sum(com) != 0.:
-                        # Vector from CA coordinates to Center of Mass
-                        nvec = normalize_vector(com - coordtmp[-1])
-                        tmp_N_vectors.append(nvec)
-                    else:
-                        tmp_N_vectors.append(np.asarray([0., 0., 0.]))
+                if np.sum(com**2) != 0.:
+                    com /= count
+                    # Vector from CA coordinates to Center of Mass
+                    nvec = normalize_vector(com - coordtmp[-1])
+                    tmp_N_vectors.append(nvec)
+                else:
+                    tmp_N_vectors.append(np.asarray([0., 0., 0.]))
         # Before next chain add all of this chain's coordinates to chain_coords
+        chainbounds[str(tags[2])] = (min(chainboundstmp), max(chainboundstmp))
+        chain_seqs.append(chainseqtmp)
         chain_coords.append(coordtmp)
         chain_bfactors.append(bfacttmp)
 
+    chainmap = []  # Stores missing res. and chain takeover points
+    c = 0.
+    for chain in chain_seqs:
+        tag = chain[0][0]
+        indx = c
+        chainmap.append((tag, indx))
+        c += len(chain)
+
+    if(len(chain_coords) > 1):
+        cflat = flatten(chain_coords)
+        N = len(cflat)
+        print('INFO: N =', N)
+
     # Dealing with Null Normal Vectors
-    if orientations:
-        normal_vectors = []
-        fcoord = np.asarray(flatten(chain_coords))
-        for iid, i in enumerate(tmp_N_vectors):
-            if np.sum(i**2) == 0.:
-                #vector from particle i to i + 1
-                rij = fcoord[iid+1] - fcoord[iid]
-                #vector from particle i to i-1
-                rih = fcoord[iid-1] - fcoord[iid]
-                nvec = normalize_vector(np.cross(rij, rih))
-                normal_vectors.append(nvec)
-            else:
-                nvec = normalize_vector(i)
-                normal_vectors.append(nvec)
-        normal_vectors = np.asarray(normal_vectors)
-
-
-    # The numbering on returntype is super arbitrary
-    if returntype == 0:
-        return chain_coords
-    elif returntype == 1:
-        return chain_coords, chainids, chain_seqs, chain_bfactors
-    elif returntype == 2:
-        return chain_coords, chain_bfactors
-    elif returntype == 3:
-        return chain_seqs
-    elif returntype == 4:
-        if orientations:
-            return chain_coords, chain_bfactors, normal_vectors
+    normal_vectors = []
+    fcoord = np.asarray(flatten(chain_coords))
+    for iid, i in enumerate(tmp_N_vectors):
+        if np.sum(i**2) == 0. and iid != len(tmp_N_vectors)-1 and iid != 0:
+            #vector from particle i to i + 1
+            rij = fcoord[iid+1] - fcoord[iid]
+            #vector from particle i to i-1
+            rih = fcoord[iid-1] - fcoord[iid]
+            nvec = normalize_vector(np.cross(rij, rih))
+            normal_vectors.append(nvec)
+        elif np.sum(i**2) == 0:
+            nvec = np.asarray([1., 0., 0.])
+            normal_vectors.append(nvec)
         else:
-            return chain_coords, chain_bfactors
+            nvec = normalize_vector(i)
+            normal_vectors.append(nvec)
+    a1s = np.asarray(normal_vectors)
 
-def free_compare(out, *data, legends=[], title=''):
+    # Calc a3 vectors
+    basis_vecs = np.asarray([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+    # Threshold to declare whether vector is perpendicular or parallel
+    epsilon = 1e-3
+    tmp_orth_vectors = []
+    for a1 in a1s:
+        if np.linalg.norm(a1) != 1.:
+            a1 = normalize_vector(a1)
+        # check if parallel to 1st basis vector
+        if not (np.dot(a1, basis_vecs[0]) > 1 - epsilon):
+            a3 = np.cross(a1, basis_vecs[0])
+        elif not (np.dot(a1, basis_vecs[1]) > 1 - epsilon):
+            a3 = np.cross(a1, basis_vecs[1])
+        # Arbitrarily Defined Just needs to be perpendicular
+        tmp_orth_vectors.append(a3)
+    a3s = np.asarray(tmp_orth_vectors)
+
+    fcoords = np.asarray(flatten(chain_coords))
+    fbfact = np.asarray(flatten(chain_bfactors))
+    fseq = []
+    for i in chain_seqs:
+        fseq += i
+
+    returndict = {"b":fbfact, "B":chain_bfactors, "c":fcoords, "C":chain_coords, "s":chain_seqs, "S": fseq,
+                  "m":chainmap, "1":a1s, "3":a3s, "p":chainbounds}
+
+    returnstrlist = list(returntype)
+    returnparser = [returndict[i] for i in returnstrlist]
+    if len(returnparser) > 1:
+        return tuple(returnparser)
+    else:
+        return returnparser[0]
+
+
+def free_compare(out, *data, legends=[], title='', bmap=''):
     cs = ['r', 'c', 'b', 'm', 'k', 'y']
+    ls = ['-', '--', '-.', ':']
     fig, ax = plt.subplots(1)
     ax.set_title(title)
+    plt.xlabel('Residue', fontsize=16)
+    plt.ylabel(r'Mean Squared Deviation [$\AA^2$]', fontsize=16)
     for yid, y in enumerate(data):
         if legends:
-            ax.plot(np.arange(0, len(y), 1), y, c=cs[yid % 6], label=legends[yid])
+            ax.plot(np.arange(0, len(y), 1), y, c=cs[yid % 6], label=legends[yid], linestyle=ls[yid % 4])
         else:
-            ax.plot(np.arange(0, len(y), 1), y, c=cs[yid % 6])
-    ax.legend()
+            ax.plot(np.arange(0, len(y), 1), y, c=cs[yid % 6], linestyle=ls[yid % 4])
+    if bmap:
+        chainids, indxs = zip(*bmap)
+        for i in range(len(chainids)):
+            plt.axvline(indxs[i])
+            plt.text(indxs[i]+1,0, chainids[i].upper(), rotation=90, fontsize=14)
+    ax.legend(loc=2, prop={'size': 14})
     plt.savefig(out, dpi=600)
     plt.close()
+
+def free_compare_jupyter(*data, legends=[], title='', bmap=''):
+    cs = ['r', 'c', 'b', 'm', 'k', 'y']
+    ls = ['-', '--', '-.', ':']
+    fig, ax = plt.subplots(1)
+    ax.set_title(title)
+    plt.xlabel('Residue', fontsize=16)
+    plt.ylabel(r'Mean Squared Deviation [$\AA^2$]', fontsize=16)
+    for yid, y in enumerate(data):
+        if legends:
+            ax.plot(np.arange(0, len(y), 1), y, c=cs[yid % 6], label=legends[yid], linestyle=ls[yid % 4])
+        else:
+            ax.plot(np.arange(0, len(y), 1), y, c=cs[yid % 6], linestyle=ls[yid % 4])
+    if bmap:
+        chainids, indxs = zip(*bmap)
+        for i in range(len(chainids)):
+            plt.axvline(indxs[i])
+            plt.text(indxs[i]+1,0, chainids[i].upper(), rotation=90, fontsize=14)
+    ax.legend(loc=2, prop={'size': 14})
+
+
 
 def diff_sqrd(l1, l2):
     diff = 0
@@ -196,20 +307,20 @@ def spherical_dphi(theta, phi):
 class ANM(object):
 
     def __init__(self, coord, exp_bfactors, T=300, cutoff=15):
-
         #Conversion factors for B Factors to Fluctiations
         self.bconv = (8. * math.pi ** 2) / 3.
         self.ibconv = 3./(8. * math.pi ** 2)
         #These are important for most loops
-        self.sim_length = 8.518
-        self.coord = coord
+        self.sim_length = 8.518 # A/sim length
+        self.coord = np.asarray(coord)
         self.cc = len(coord)
         #Data to match to
         self.exp_bfactors = exp_bfactors
         self.exp_msds = [self.ibconv*x for x in self.exp_bfactors]
 
-        self.ana_bfactors = []
         self.msds = []
+        self.ana_bfactors = []
+        self.ana_msd = []
         self.ana_gamma = 0.
         # Angstroms
         self.cutoff = cutoff
@@ -234,6 +345,9 @@ class ANM(object):
                     dx = self.coord[j,0]- self.coord[i,0]
                     dy = self.coord[j,1]- self.coord[i,1]
                     dz = self.coord[j,2]- self.coord[i,2]
+                    # dx = self.coord[i, 0] - self.coord[j, 0]
+                    # dy = self.coord[i, 1] - self.coord[j, 1]
+                    # dz = self.coord[i, 2] - self.coord[j, 2]
                     dist = np.sqrt(dx**2 + dy**2 + dz**2)
                     # too far, skips
                     if dist > float(self.cutoff):
@@ -275,7 +389,7 @@ class ANM(object):
                     hess[3 * j: 3 * j + 3, 3 * i: 3 * i + 3] -= full
         return hess
 
-    def calc_hess_fast_unitary(self):
+    def calc_hess_fast_unitary(self, gamma=1.):
         threeN = 3 * self.cc
         hess = np.zeros((threeN, threeN), dtype=np.float32)
         for i in range(self.cc):
@@ -286,7 +400,7 @@ class ANM(object):
                 # Filter so that Hessian is only created for those bonds in bonds array
                 if di[0] != 0:
                     di2 = np.square(di)
-                    g = 1.
+                    g = gamma
 
                     diag = g * di2[1:4] / di2[0]
 
@@ -317,7 +431,7 @@ class ANM(object):
                 U, w, Vt = scipy.linalg.svd(hess, full_matrices=False)
         else:
             U, w, Vt = scipy.linalg.svd(hess, full_matrices=False)
-        print(w)
+        #print(w)
         S = scipy.linalg.diagsvd(w, len(w), len(w))
         tol = 1e-4
         singular = w < tol
@@ -345,16 +459,39 @@ class ANM(object):
         sc_range = np.arange(br, er, step)
         for i in sc_range:
             g = float(i)
-            r.append(diff_sqrd([x * 1. / g for x in self.msds], self.exp_msds))
+            r.append(diff_sqrd([x * 1. / g * self.bconv for x in self.msds], self.exp_bfactors))
+
         results = np.array(r)
         bg = np.argmin(results)
         return bg * step + br
 
-    def ANM_fit_to_exp(self, start=0.001, end=5.0, step=0.001):
+    def ANM_fit_to_exp(self, start=0.001, end=5.000, step=0.001):
         g1 = self.ANM_search(start, end, step)
         self.ana_gamma = g1
         self.ana_msd = [x * 1 / self.ana_gamma for x in self.msds]
-        self.ana_bfactors = [(8 * math.pi ** 2) / 3 * x * 1 / self.ana_gamma for x in self.msds]
+        self.ana_bfactors = [self.bconv * x * 1 / self.ana_gamma for x in self.msds]
+
+    def ANM_fit_to_exp_linear(self):
+        if self.msds: # The mean square deviations must be precomputed
+            try:
+                from sklearn.linear_model import LinearRegression
+            except ImportError:
+                print('Check that sklearn module is installed')
+                sys.exit()
+            flex_data = np.asarray([x * self.bconv for x in self.msds])
+            exp_data = np.asarray(self.exp_bfactors)
+            X = flex_data.reshape(-1, 1) #.transpose()
+            Y = exp_data
+            fitting = LinearRegression(fit_intercept=False)
+            fitting.fit(X, Y)
+            slope = fitting.coef_
+            #print(slope)
+            #print(X, Y)
+            self.ana_gamma = float(1/slope)
+            self.ana_msd = [x * 1 / self.ana_gamma for x in self.msds]
+            self.ana_bfactors = [self.bconv * x * 1 / self.ana_gamma for x in self.msds]
+        else:
+            print("Prior to Calling ANM_fit_to_exp_linear you must calc the msds")
 
     def calc_msds(self, invhess):
         self.msds = []
@@ -364,7 +501,7 @@ class ANM(object):
 
     def anm_calc_bfactors(self):
         self.ana_bfactors = []
-        self.ana_bfactors = [self.bconv*x*1/self.ana_gamma for x in self.msds]
+        self.ana_bfactors = [self.bconv*x*1/self.ana_gamma for x in self.ana_msd]
 
     def calc_ANM_sc(self, spring_constant_matrix, cuda=False):
         self.calc_dist_matrix()
@@ -379,13 +516,30 @@ class ANM(object):
         iH = self.calc_inv_Hess(hess, cuda=cuda)
 
         self.calc_msds(iH)
-        print(self.msds)
-        self.ANM_fit_to_exp()
+        self.ANM_fit_to_exp_linear()
 
-    def anm_compare_bfactors(self, outfile):
+    def anm_compare_bfactors(self, outfile, bmap=''):
         if self.ana_bfactors:
-            free_compare(outfile, self.exp_bfactors, self.ana_bfactors,
-                         legends=['Experimental  (PDB)', 'Analytical (ANM)' + str(round(self.ana_gamma*100, 3))+ "(pN/A)"])
+            if bmap:
+                free_compare(outfile, self.exp_bfactors, self.ana_bfactors, bmap=bmap,
+                             legends=['Experimental  (PDB)',
+                                      'Analytical (ANM)' + str(round(self.ana_gamma * 100, 3)) + "(pN/A)"])
+            else:
+                free_compare(outfile, self.exp_bfactors, self.ana_bfactors,
+                    legends=['Experimental  (PDB)', 'Analytical (ANM)' + str(round(self.ana_gamma*100, 3))+ "(pN/A)"])
+        else:
+            print('Analytical B Factors have not been Calculated')
+
+    def anm_compare_bfactors_jupyter(self, bmap=''):
+        if self.ana_bfactors:
+            if bmap:
+                free_compare_jupyter(self.exp_bfactors, self.ana_bfactors, bmap=bmap,
+                             legends=['Experimental  (PDB)',
+                                      'Analytical (ANM)' + str(round(self.ana_gamma * 100, 3)) + "(pN/A)"])
+            else:
+                free_compare_jupyter(self.exp_bfactors, self.ana_bfactors,
+                             legends=['Experimental  (PDB)',
+                                      'Analytical (ANM)' + str(round(self.ana_gamma * 100, 3)) + "(pN/A)"])
         else:
             print('Analytical B Factors have not been Calculated')
 
@@ -398,17 +552,34 @@ class ANM(object):
 
 
 class peptide():
-    def __init__(self, pdbfile, cutoff=5, indx_cutoff=5, potential=5):
+    def __init__(self, pdbfile, cutoff=5, indx_cutoff=5, potential=5, backbone_weight=0):
         self.model_id = 'pep'
-        ccoord, cbfacts, normal_vectors = get_pdb_info(pdbfile, returntype=4, multimodel=False, orientations=True)
-        self.a1s = normal_vectors
-        self.a3s = []
-        self.coord = np.asarray(flatten(ccoord))
+        ccoord, cbfacts = get_pdb_info(pdbfile, returntype='cb')
+        self.coord = ccoord
         self.pi = len(self.coord)
         self.bonds = []
         self.cutoff = cutoff
         self.indx_cutoff = indx_cutoff
         self.potential = potential
+        self.backbone_weight=backbone_weight
+    def calc_bonds_bounded(self, indxLowerbound, indxUpperbound):
+        self.bonds = []
+        for i in range(self.pi):
+            if i < self.pi-1:
+                self.bonds.append((i, i+1))
+            for j in range(self.pi):
+                if i >= j:
+                    continue
+                if i < indxLowerbound or j < indxLowerbound:
+                    continue
+                if i > indxUpperbound or j > indxUpperbound:
+                    continue
+                dx = self.coord[j, 0] - self.coord[i, 0]
+                dy = self.coord[j, 1] - self.coord[i, 1]
+                dz = self.coord[j, 2] - self.coord[i, 2]
+                dist = math.sqrt(abs(dx) ** 2 + abs(dy) ** 2 + abs(dz) ** 2)
+                if dist < self.cutoff:
+                    self.bonds.append((i, j))
     def calc_bonds(self):
         self.bonds = []
         for i in range(self.pi):
@@ -423,21 +594,7 @@ class peptide():
                 dist = math.sqrt(abs(dx) ** 2 + abs(dy) ** 2 + abs(dz) ** 2)
                 if dist < self.cutoff:
                     self.bonds.append((i, j))
-    def calc_a3s(self):
-        basis_vecs = np.asarray([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
-        #Threshold to declare whether vector is perpendicular or parallel
-        epsilon = 1e-3
-        for a1 in self.a1s:
-            if np.linalg.norm(a1) != 1.:
-                a1 = normalize_vector(a1)
-            # check if parallel to 1st basis vector
-            if not (np.dot(a1, basis_vecs[0]) > 1-epsilon):
-                a3 = np.cross(a1, basis_vecs[0])
-            elif not (np.dot(a1, basis_vecs[1]) > 1-epsilon):
-                a3 = np.cross(a1, basis_vecs[1])
-            #Arbitrarily Defined Just needs to be perpendicular
-            self.a3s.append(a3)
-        self.a3s = np.asarray(self.a3s)
+
 
 class kernel():
     def __init__(self, id):
@@ -493,6 +650,9 @@ class kernel():
     def shift_kerns(self, shift):
         self.kerns = [x * shift for x in self.kerns]
 
+
+#Known Issues: Can sometimes return negative spring constants
+#No python linear fit function enforces the slope values to be non-negative AND fit without an intercept
 class Multiscale_ANM(ANM):
     def __init__(self, coord, exp_bfactors, T=300):
         super().__init__(coord, exp_bfactors, T=T)
@@ -570,325 +730,253 @@ class Multiscale_ANM(ANM):
 
 
 
-class ANM_wT(ANM):
-    def __init__(self, coord, normal_vectors, exp_bfactors, T=300):
-        super().__init__(coord, exp_bfactors, T=T)
-        self.model_id = 'TANM'
-        self.normal_vectors = normal_vectors
-        self.a3s = []
+class ANMT(ANM):
+    def __init__(self, coord, exp_bfactors, T=300, cutoff=13):
+        super().__init__(coord, exp_bfactors, T=T, cutoff=cutoff)
+        self.model_id = 'ANMT'
         self.kernels = []
 
-    def get_rotation_matrix(self, axis, anglest):
-        # copied from oxDNA UTILS (Not currently used but could be helpful later)
-        # the argument anglest can be either an angle in radians
-        # (accepted types are float, int or np.float64 or np.float64)
-        # or a tuple [angle, units] where angle a number and
-        # units is a string. It tells the routine whether to use degrees,
-        # radiants (the default) or base pairs turns
-        if not isinstance(anglest, (np.float64, np.float32, float, int)):
-            if len(anglest) > 1:
-                if anglest[1] in ["degrees", "deg", "o"]:
-                    # angle = np.deg2rad (anglest[0])
-                    angle = (np.pi / 180.) * (anglest[0])
-                elif anglest[1] in ["bp"]:
-                    angle = int(anglest[0]) * (np.pi / 180.) * (35.9)
-                else:
-                    angle = float(anglest[0])
-            else:
-                angle = float(anglest[0])
-        else:
-            angle = float(anglest)  # in degrees, I think
-
-        axis = np.array(axis)
-        axis /= np.sqrt(np.dot(axis, axis))
-
-        ct = np.cos(angle)
-        st = np.sin(angle)
-        olc = 1. - ct
-        x, y, z = axis
-
-        return np.array([[olc * x * x + ct, olc * x * y - st * z, olc * x * z + st * y],
-                         [olc * x * y + st * z, olc * y * y + ct, olc * y * z - st * x],
-                         [olc * x * z - st * y, olc * y * z + st * x, olc * z * z + ct]])
-
-    def calc_a3s(self):
-        basis_vecs = np.asarray([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
-        #Threshold to declare whether vector is perpendicular or parallel
-        epsilon = 1e-3
-        for a1 in self.normal_vectors:
-            if np.linalg.norm(a1) != 1.:
-                a1 = normalize_vector(a1)
-            # check if parallel to 1st basis vector
-            if not (np.dot(a1, basis_vecs[0]) > 1-epsilon):
-                a3 = np.cross(a1, basis_vecs[0])
-            elif not (np.dot(a1, basis_vecs[1]) > 1-epsilon):
-                a3 = np.cross(a1, basis_vecs[1])
-            #Arbitrarily Defined Just needs to be perpendicular
-            self.a3s.append(a3)
-        self.a3s = np.asarray(self.a3s)
-
-    def calc_bend_hess(self, kb=1, kt=1):
-        _7n = 7*len(self.coord)
-        self.calc_dist_matrix()
-        bend_hess = np.full((_7n, _7n), 0.0)
-        for i in range(self.cc-1):
-            j = i+1
-            a1 = self.normal_vectors[i]
-            b1 = self.normal_vectors[j]
-            a3 = self.a3s[i]
-            b3 = self.a3s[j]
-
-            r, dx, dy, dz = self.distance_matrix[i, 4 * j:4 * j + 4]
-            rij = np.asarray([dx, dy, dz])
-            vx = np.asarray([dx**2., dx*dy, dx*dz])
-            vy = np.asarray([dx*dy, dy**2., dz*dy])
-            vz = np.asarray([dx*dz, dy*dz, dz**2.])
-
-            Aix = a1[0]/r - np.dot(a1, vx)/(r**3.)
-            Aiy = a1[1]/r - np.dot(a1, vy)/(r**3.)
-            Aiz = a1[2]/r - np.dot(a1, vz)/(r**3.)
-
-            Ajx = b1[0]/r - np.dot(b1, vx)/(r**3.)
-            Ajy = b1[1]/r - np.dot(b1, vy)/(r**3.)
-            Ajz = b1[2]/r - np.dot(b1, vz)/(r**3.)
-
-            # Spherical Vector Derivatives
-            t1i, p1i = get_spherical_angles(a1)
-            t1j, p1j = get_spherical_angles(b1)
-            t3i, p3i = get_spherical_angles(a3)
-            t3j, p3j = get_spherical_angles(b3)
-
-            # Needed for a1, a3 dof derivatives
-            dv1i_theta = spherical_dtheta(t1i, p1i)
-            dv1i_phi = spherical_dphi(t1i, p1i)
-
-            dv1j_theta = spherical_dtheta(t1j, p1j)
-            dv1j_phi = spherical_dphi(t1j, p1j)
-
-            dv3i_theta = spherical_dtheta(t3i, p3i)
-            dv3i_phi = spherical_dphi(t3i, p3i)
-
-            dv3j_theta = spherical_dtheta(t3j, p3j)
-            dv3j_phi = spherical_dphi(t3j, p3j)
-
-            # Derivatives without Spring Interaction for xi, xj -> zi, zj
-            # -dir for Hij and Hji, + for Hii and Hjj
-            dir = np.full((3, 3), 0.0)
-            dir[0] = [Aix*Aix+Ajx*Ajx, Aix*Aiy+Ajx*Ajy, Aix*Aiz+Ajx*Ajz]
-            dir[1] = [Aiy*Aix+Ajy*Ajx, Aiy*Aiy+Ajy*Ajy, Aiy*Aiz+Ajy*Ajz]
-            dir[2] = [Aiz*Aix+Ajz*Ajx, Aiz*Aiy+Ajz*Ajy, Aiz*Aiz+Ajz*Ajz]
-            # Just Missing a kb term now
-
-            #Hij Angular Derivatives
-            # Angular Derivatives 3 Rows(xi, yi, zi) Two Columns(theta1j, phi1j)
-            # Postion -> Angle PA
-            #ex. dU/ dxi theta1j ...
-            PA_ij = np.full((3, 2), 0.0)
-            PA_ij[0] = [-1.*np.dot(rij, dv1j_theta)/r*Ajx, -1.*np.dot(rij, dv1j_phi)/r*Ajx]
-            PA_ij[1] = [-1.*np.dot(rij, dv1j_theta)/r*Ajy, -1.*np.dot(rij, dv1j_phi)/r*Ajy]
-            PA_ij[2] = [-1.*np.dot(rij, dv1j_theta)/r*Ajz, -1.*np.dot(rij, dv1j_phi)/r*Ajz]
-            # Just Missing a kb term now
-
-            # Angular Derivatives 2 Rows(theta1i, phi1i) Three Columns(xj, yj, zj)
-            # Angle -> Position AP
-            # ex. dU/ dtheta1i xj ...
-            AP_ij = np.full((2, 3), 0.0)
-            AP_ij[0] = [np.dot(rij, dv1i_theta) / r * Aix, np.dot(rij, dv1i_theta) / r * Aiy, np.dot(rij, dv1i_theta) / r * Aiz]
-            AP_ij[1] = [np.dot(rij, dv1i_phi) / r * Aix, np.dot(rij, dv1i_phi) / r * Aiy, np.dot(rij, dv1i_phi) / r * Aiz]
-            # Just Missing a kb term now
-
-            # Hji Angular Derivatives
-            # Angular Derivatives 3 Rows(xi, yi, zi) Two Columns(theta1j, phi1j)
-            # Postion -> Angle PA
-            # ex. dU/ dxj theta1i ...
-            PA_ji = np.full((3, 2), 0.0)
-            PA_ji[0] = [np.dot(rij, dv1i_theta) / r * Aix, np.dot(rij, dv1i_phi) / r * Aix]
-            PA_ji[1] = [np.dot(rij, dv1i_theta) / r * Aiy, np.dot(rij, dv1i_phi) / r * Aiy]
-            PA_ji[2] = [np.dot(rij, dv1i_theta) / r * Aiz, np.dot(rij, dv1i_phi) / r * Aiz]
-            # Just Missing a kb term now
-
-            # Angular Derivatives 2 Rows(theta1i, phi1i) Three Columns(xj, yj, zj)
-            # Angle -> Position AP
-            # ex. dU/ dtheta1i xi ...
-            AP_ji = np.full((2, 3), 0.0)
-            AP_ji[0] = [-1.*np.dot(rij, dv1j_theta) / r * Ajx, -1.*np.dot(rij, dv1j_theta) / r * Ajy, -1.*np.dot(rij, dv1j_theta) / r * Ajz]
-            AP_ji[1] = [-1.*np.dot(rij, dv1j_phi) / r * Ajx, -1.*np.dot(rij, dv1j_phi) / r * Ajy, -1.*np.dot(rij, dv1j_phi) / r * Ajz]
-            # Just Missing a kb term now
-
-            #Use Relationships to calc Hii, Hjj
-            PA_ii = -1*PA_ji
-            AP_ii = -1*AP_ij
-
-            PA_jj = -1*PA_ij
-            AP_jj = -1*AP_ji
-
-            # Hii Angle to Angle bending terms
-            AAB_ii = np.full((2, 2), 0.0)
-            AAB_ii[0] = [np.dot(rij, dv1i_theta)**2. / (r**2.), np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r**2.)]
-            AAB_ii[1] = [np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r**2.), np.dot(rij, dv1i_phi)**2. / (r**2.)]
-            # Just missing kb term
-
-            # Hjj Angle to Angle bending Terms
-            AAB_jj = np.full((2, 2), 0.0)
-            AAB_jj[0] = [np.dot(rij, dv1j_theta)**2. / (r**2.), np.dot(rij, dv1j_theta) * np.dot(rij, dv1j_phi) / (r**2.)]
-            AAB_jj[1] = [np.dot(rij, dv1j_theta) * np.dot(rij, dv1j_phi) / (r**2.), np.dot(rij, dv1j_phi)**2. / (r**2.)]
-            # Just missing kb term
-
-            #Hii Angle to Angle torsion Terms
-            AAT_ii = np.full((2, 2), 0.0)
-            AAT_ii[0] = [np.dot(b1, dv1i_theta)**2., np.dot(b1, dv1i_phi) * np.dot(b1, dv1i_theta)]
-            AAT_ii[1] = [np.dot(b1, dv1i_phi) * np.dot(b1, dv1i_theta), np.dot(b1, dv1i_phi)**2.]
-
-            #Hjj Angle to Angle torsion Terms
-            AAT_jj = np.full((2, 2), 0.0)
-            AAT_jj[0] = [np.dot(a1, dv1j_theta)**2., np.dot(a1, dv1j_phi) * np.dot(a1, dv1j_theta)]
-            AAT_jj[1] = [np.dot(a1, dv1j_phi) * np.dot(a1, dv1j_theta), np.dot(a1, dv1j_phi)**2.]
-
-            # Same for ii, jj, and ij terms
-            # Torsion Derviatives a1 & b1
-            AAT_ij = np.full((2, 2), 0.0)
-            AAT_ij[0] = [np.dot(a1, dv1j_theta) * np.dot(b1, dv1i_theta), np.dot(a1, dv1j_phi) * np.dot(b1, dv1i_theta)]
-            AAT_ij[1] = [np.dot(a1, dv1j_theta) * np.dot(b1, dv1i_phi), np.dot(a1, dv1j_phi) * np.dot(b1, dv1i_phi)]
-            # Just missing kt term now
-
-            # Torsion Derivatives ai, b1 for Hji
-            AAT_ji = np.matrix.transpose(AAT_ij)
-            # AAT_ji = AAT_ij
-
-            # Torsion Derviatives a3 & b3
-            AA3T_ij = np.full((2, 2), 0.0)
-            AA3T_ij[0] = [np.dot(a3, dv3j_theta) * np.dot(b3, dv3i_theta), np.dot(a3, dv3j_phi) * np.dot(b3, dv3i_theta)]
-            AA3T_ij[1] = [np.dot(a3, dv3j_theta) * np.dot(b3, dv3i_phi), np.dot(a3, dv3j_phi) * np.dot(b3, dv3i_phi)]
-            # just missing kt term now
-
-            # Torsion Derivatives a3, b3 for Hji
-            AA3T_ji = np.matrix.transpose(AA3T_ij)
-            # AA3T_ji = AA3T_ij
-
-            # Hii Angle to Angle torsion Terms a3 & b3
-            AA3T_ii = np.full((2, 2), 0.0)
-            AA3T_ii[0] = [np.dot(b3, dv3i_theta) ** 2., np.dot(b3, dv3i_phi) * np.dot(b3, dv3i_theta)]
-            AA3T_ii[1] = [np.dot(b3, dv3i_phi) * np.dot(b3, dv3i_theta), np.dot(b3, dv3i_phi) ** 2.]
-
-            # Hjj Angle to Angle torsion Terms a3& b3
-            AA3T_jj = np.full((2, 2), 0.0)
-            AA3T_jj[0] = [np.dot(a3, dv3j_theta) ** 2., np.dot(a3, dv3j_phi) * np.dot(a3, dv3j_theta)]
-            AA3T_jj[1] = [np.dot(a3, dv3j_phi) * np.dot(a3, dv3j_theta), np.dot(a3, dv3j_phi) ** 2.]
-
-
-            # #Hii Angular Terms
-            # AngiiT = np.full((2, 3), 0.0)
-            # AngiiT[0] = [-1.*np.dot(rij, dv1i_theta)/r*Aix, -1.*np.dot(rij, dv1i_theta)/r*Aiy, -1.*np.dot(rij, dv1i_theta)/r*Aiz]
-            # AngiiT[1] = [-1.*np.dot(rij, dv1i_phi)/r*Aix, -1.*np.dot(rij, dv1i_phi)/r*Aiy, -1.*np.dot(rij, dv1i_phi)/r*Aiz]
-            # Angii = np.matrix.transpose(AngiiT)
-            # #Just Missing kb Terms
-            #
-            # #Hii Ang/Ang Torsion Terms
-            # a1Tii_t = np.full((2, 2), 0.0)
-            # a1Tii_t[0] = [np.dot(b1, dv1i_theta) ** 2., np.dot(b1, dv1i_phi) * np.dot(b1, dv1i_theta)]
-            # a1Tii_t[1] = [np.dot(b1, dv1i_phi) * np.dot(b1, dv1i_theta), np.dot(b1, dv1i_phi) ** 2.]
-            # # Just missing kt term
-            #
-            # #Hii Ang/Ang Bending Terms
-            # a1Tii_b = np.full((2, 2), 0.0)
-            # a1Tii_b[0] = [np.dot(rij, dv1i_theta)**2. / (r ** 2.), np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r**2.)]
-            # a1Tii_b[1] = [np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r**2.), np.dot(rij, dv1i_phi)**2. / (r**2.)]
-            # # Just missing kb term
-            #
-            # #Hjj Angular Terms
-            # AngjjT = np.full((2, 3), 0.0)
-            # AngjjT[0] = [np.dot(rij, dv1j_theta) / r * Ajx, np.dot(rij, dv1j_theta) / r * Ajy, np.dot(rij, dv1j_theta) / r * Ajz]
-            # AngjjT[1] = [np.dot(rij, dv1j_phi) / r * Ajx, np.dot(rij, dv1j_phi) / r * Ajy, np.dot(rij, dv1j_phi) / r * Ajz]
-            # Angjj = np.matrix.transpose(AngjjT)
-            # # Just Missing kb Terms
-            # # Hjj Ang/Ang Torsion Terms
-            #
-            # # Just missing kt term
-            #
-            # # Hjj Ang/Ang Bending Terms
-            # a1Tjj_b = np.full((2, 2), 0.0)
-            # a1Tjj_b[0] = [np.dot(rij, dv1i_theta) ** 2. / (r ** 2), np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r ** 2)]
-            # a1Tjj_b[1] = [np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r ** 2), np.dot(rij, dv1i_phi) ** 2. / (r ** 2)]
-            # # Just missing kb term
-
-
-
-            #All derivatives Calculated, Now just Fill Hij
-            subHij = np.full((7, 7), 0.0)
-            subHij[0:3, 0:3] = -dir * kb
-            subHij[0:3, 3:5] = kb * PA_ij
-            subHij[3:5, 0:3] = kb * AP_ij
-            subHij[3:5, 3:5] = kt * AAT_ij
-            subHij[5:7, 5:7] = kt * AA3T_ij
-
-            #Hji
-            subHji = np.full((7, 7), 0.0)
-            subHji[0:3, 0:3] = -dir * kb
-            subHji[0:3, 3:5] = kb * PA_ji
-            subHji[3:5, 0:3] = kb * AP_ji
-            subHji[3:5, 3:5] = kt * AAT_ji
-            subHji[5:7, 5:7] = kt * AA3T_ji
-
-            #Fill Hii
-            subHii = np.full((7, 7), 0.0)
-            subHii[0:3, 0:3] = dir * kb
-            subHii[0:3, 3:5] = kb * PA_ii
-            subHii[3:5, 0:3] = kb * AP_ii
-            subHii[3:5, 3:5] = kt * AAT_ii + kb * AAB_ii
-            subHii[5:7, 5:7] = kt * AA3T_ii
-
-            #Fill Hjj
-            subHjj = np.full((7, 7), 0.0)
-            subHjj[0:3, 0:3] = dir * kb
-            subHjj[0:3, 3:5] = kb * PA_jj
-            subHjj[3:5, 0:3] = kb * AP_jj
-            subHjj[3:5, 3:5] = kt * AAT_jj + kb * AAB_jj
-            subHjj[5:7, 5:7] = kt * AA3T_jj
-
-            #Fill Actual Matrix
-            bend_hess[7 * i:7 * i + 7, 7 * j:7 * j + 7] += subHij
-            bend_hess[7 * j:7 * j + 7, 7 * i:7 * i + 7] += subHji
-            bend_hess[7 * i:7 * i + 7, 7 * i:7 * i + 7] += subHii
-            bend_hess[7 * j:7 * j + 7, 7 * j:7 * j + 7] += subHjj
-
-        return bend_hess
-
-    def total_hess(self, bend_hess, spring_hess, ks=1):
-        for i in range(self.cc):
-            for j in range(self.cc):
-                bend_hess[7*i:7*i+3, 7*j:7*j+3] += spring_hess[3*i:3*i+3, 3*j:3*j+3]*ks
-        return bend_hess
-
-    def calc_bfacts(self, inversehess):
-        msd = []
-        for i in range(self.cc):
-            print(inversehess[7*i:7*i+3, 7*i:7*i+3])
-            msd.append(self.kb*self.T*np.sum(np.diag(inversehess[7*i:7*i+3, 7*i:7*i+3])))
-            #this ain't it
-            # msd.append(self.kb*self.T*np.sum(np.diag(inversehess[7*i:7*i+7, 7*i:7*i+7])))
-        ana_bfactors = [self.bconv * x for x in msd]
-
-        return ana_bfactors
-
-    #
-    #
-    # def ANMT_fit_to_exp(self):
-    #     hess_bend =
-    #     try:
-    #         from sklearn.linear_model import LinearRegression
-    #     except ImportError:
-    #         print('Check that sklearn module is installed')
-    #         sys.exit()
-    #     flex_data = np.asarray(raw)
-    #     exp_data = np.asarray(self.inv_bfactors)
-    #     X = flex_data.transpose()
-    #     Y = exp_data
-    #     print(flex_data)
-    #     fitting = LinearRegression(fit_intercept=False)
-    #     fitting.fit(X, Y)
-    #     slope = fitting.coef_
+#     def get_rotation_matrix(self, axis, anglest):
+#         # copied from oxDNA UTILS (Not currently used but could be helpful later)
+#         # the argument anglest can be either an angle in radians
+#         # (accepted types are float, int or np.float64 or np.float64)
+#         # or a tuple [angle, units] where angle a number and
+#         # units is a string. It tells the routine whether to use degrees,
+#         # radiants (the default) or base pairs turns
+#         if not isinstance(anglest, (np.float64, np.float32, float, int)):
+#             if len(anglest) > 1:
+#                 if anglest[1] in ["degrees", "deg", "o"]:
+#                     # angle = np.deg2rad (anglest[0])
+#                     angle = (np.pi / 180.) * (anglest[0])
+#                 elif anglest[1] in ["bp"]:
+#                     angle = int(anglest[0]) * (np.pi / 180.) * (35.9)
+#                 else:
+#                     angle = float(anglest[0])
+#             else:
+#                 angle = float(anglest[0])
+#         else:
+#             angle = float(anglest)  # in degrees, I think
+#
+#         axis = np.array(axis)
+#         axis /= np.sqrt(np.dot(axis, axis))
+#
+#         ct = np.cos(angle)
+#         st = np.sin(angle)
+#         olc = 1. - ct
+#         x, y, z = axis
+#
+#         return np.array([[olc * x * x + ct, olc * x * y - st * z, olc * x * z + st * y],
+#                          [olc * x * y + st * z, olc * y * y + ct, olc * y * z - st * x],
+#                          [olc * x * z - st * y, olc * y * z + st * x, olc * z * z + ct]])
+#
+#     def calc_bend_hess(self, kb=1, kt=1):
+#         # prototype, this is not working yet
+#         _7n = 7*len(self.coord)
+#         self.calc_dist_matrix()
+#         bend_hess = np.full((_7n, _7n), 0.0)
+#         for i in range(self.cc-1):
+#             j = i+1
+#             a1 = self.normal_vectors[i]
+#             b1 = self.normal_vectors[j]
+#             a3 = self.a3s[i]
+#             b3 = self.a3s[j]
+#
+#             r, dx, dy, dz = self.distance_matrix[i, 4 * j:4 * j + 4]
+#             rij = np.asarray([dx, dy, dz])
+#             vx = np.asarray([dx**2., dx*dy, dx*dz])
+#             vy = np.asarray([dx*dy, dy**2., dz*dy])
+#             vz = np.asarray([dx*dz, dy*dz, dz**2.])
+#
+#             Aix = a1[0]/r - np.dot(a1, vx)/(r**3.)
+#             Aiy = a1[1]/r - np.dot(a1, vy)/(r**3.)
+#             Aiz = a1[2]/r - np.dot(a1, vz)/(r**3.)
+#
+#             Ajx = b1[0]/r - np.dot(b1, vx)/(r**3.)
+#             Ajy = b1[1]/r - np.dot(b1, vy)/(r**3.)
+#             Ajz = b1[2]/r - np.dot(b1, vz)/(r**3.)
+#
+#             # Spherical Vector Derivatives
+#             t1i, p1i = get_spherical_angles(a1)
+#             t1j, p1j = get_spherical_angles(b1)
+#             t3i, p3i = get_spherical_angles(a3)
+#             t3j, p3j = get_spherical_angles(b3)
+#
+#             # Needed for a1, a3 dof derivatives
+#             dv1i_theta = spherical_dtheta(t1i, p1i)
+#             dv1i_phi = spherical_dphi(t1i, p1i)
+#
+#             dv1j_theta = spherical_dtheta(t1j, p1j)
+#             dv1j_phi = spherical_dphi(t1j, p1j)
+#
+#             dv3i_theta = spherical_dtheta(t3i, p3i)
+#             dv3i_phi = spherical_dphi(t3i, p3i)
+#
+#             dv3j_theta = spherical_dtheta(t3j, p3j)
+#             dv3j_phi = spherical_dphi(t3j, p3j)
+#
+#             # Derivatives without Spring Interaction for xi, xj -> zi, zj
+#             # -dir for Hij and Hji, + for Hii and Hjj
+#             dir = np.full((3, 3), 0.0)
+#             dir[0] = [Aix*Aix+Ajx*Ajx, Aix*Aiy+Ajx*Ajy, Aix*Aiz+Ajx*Ajz]
+#             dir[1] = [Aiy*Aix+Ajy*Ajx, Aiy*Aiy+Ajy*Ajy, Aiy*Aiz+Ajy*Ajz]
+#             dir[2] = [Aiz*Aix+Ajz*Ajx, Aiz*Aiy+Ajz*Ajy, Aiz*Aiz+Ajz*Ajz]
+#             # Just Missing a kb term now
+#
+#             #Hij Angular Derivatives
+#             # Angular Derivatives 3 Rows(xi, yi, zi) Two Columns(theta1j, phi1j)
+#             # Postion -> Angle PA
+#             #ex. dU/ dxi theta1j ...
+#             PA_ij = np.full((3, 2), 0.0)
+#             PA_ij[0] = [-1.*np.dot(rij, dv1j_theta)/r*Ajx, -1.*np.dot(rij, dv1j_phi)/r*Ajx]
+#             PA_ij[1] = [-1.*np.dot(rij, dv1j_theta)/r*Ajy, -1.*np.dot(rij, dv1j_phi)/r*Ajy]
+#             PA_ij[2] = [-1.*np.dot(rij, dv1j_theta)/r*Ajz, -1.*np.dot(rij, dv1j_phi)/r*Ajz]
+#             # Just Missing a kb term now
+#
+#             # Angular Derivatives 2 Rows(theta1i, phi1i) Three Columns(xj, yj, zj)
+#             # Angle -> Position AP
+#             # ex. dU/ dtheta1i xj ...
+#             AP_ij = np.full((2, 3), 0.0)
+#             AP_ij[0] = [np.dot(rij, dv1i_theta) / r * Aix, np.dot(rij, dv1i_theta) / r * Aiy, np.dot(rij, dv1i_theta) / r * Aiz]
+#             AP_ij[1] = [np.dot(rij, dv1i_phi) / r * Aix, np.dot(rij, dv1i_phi) / r * Aiy, np.dot(rij, dv1i_phi) / r * Aiz]
+#             # Just Missing a kb term now
+#
+#             # Hji Angular Derivatives
+#             # Angular Derivatives 3 Rows(xi, yi, zi) Two Columns(theta1j, phi1j)
+#             # Postion -> Angle PA
+#             # ex. dU/ dxj theta1i ...
+#             PA_ji = np.full((3, 2), 0.0)
+#             PA_ji[0] = [np.dot(rij, dv1i_theta) / r * Aix, np.dot(rij, dv1i_phi) / r * Aix]
+#             PA_ji[1] = [np.dot(rij, dv1i_theta) / r * Aiy, np.dot(rij, dv1i_phi) / r * Aiy]
+#             PA_ji[2] = [np.dot(rij, dv1i_theta) / r * Aiz, np.dot(rij, dv1i_phi) / r * Aiz]
+#             # Just Missing a kb term now
+#
+#             # Angular Derivatives 2 Rows(theta1i, phi1i) Three Columns(xj, yj, zj)
+#             # Angle -> Position AP
+#             # ex. dU/ dtheta1i xi ...
+#             AP_ji = np.full((2, 3), 0.0)
+#             AP_ji[0] = [-1.*np.dot(rij, dv1j_theta) / r * Ajx, -1.*np.dot(rij, dv1j_theta) / r * Ajy, -1.*np.dot(rij, dv1j_theta) / r * Ajz]
+#             AP_ji[1] = [-1.*np.dot(rij, dv1j_phi) / r * Ajx, -1.*np.dot(rij, dv1j_phi) / r * Ajy, -1.*np.dot(rij, dv1j_phi) / r * Ajz]
+#             # Just Missing a kb term now
+#
+#             #Use Relationships to calc Hii, Hjj
+#             PA_ii = -1*PA_ji
+#             AP_ii = -1*AP_ij
+#
+#             PA_jj = -1*PA_ij
+#             AP_jj = -1*AP_ji
+#
+#             # Hii Angle to Angle bending terms
+#             AAB_ii = np.full((2, 2), 0.0)
+#             AAB_ii[0] = [np.dot(rij, dv1i_theta)**2. / (r**2.), np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r**2.)]
+#             AAB_ii[1] = [np.dot(rij, dv1i_theta) * np.dot(rij, dv1i_phi) / (r**2.), np.dot(rij, dv1i_phi)**2. / (r**2.)]
+#             # Just missing kb term
+#
+#             # Hjj Angle to Angle bending Terms
+#             AAB_jj = np.full((2, 2), 0.0)
+#             AAB_jj[0] = [np.dot(rij, dv1j_theta)**2. / (r**2.), np.dot(rij, dv1j_theta) * np.dot(rij, dv1j_phi) / (r**2.)]
+#             AAB_jj[1] = [np.dot(rij, dv1j_theta) * np.dot(rij, dv1j_phi) / (r**2.), np.dot(rij, dv1j_phi)**2. / (r**2.)]
+#             # Just missing kb term
+#
+#             #Hii Angle to Angle torsion Terms
+#             AAT_ii = np.full((2, 2), 0.0)
+#             AAT_ii[0] = [np.dot(b1, dv1i_theta)**2., np.dot(b1, dv1i_phi) * np.dot(b1, dv1i_theta)]
+#             AAT_ii[1] = [np.dot(b1, dv1i_phi) * np.dot(b1, dv1i_theta), np.dot(b1, dv1i_phi)**2.]
+#
+#             #Hjj Angle to Angle torsion Terms
+#             AAT_jj = np.full((2, 2), 0.0)
+#             AAT_jj[0] = [np.dot(a1, dv1j_theta)**2., np.dot(a1, dv1j_phi) * np.dot(a1, dv1j_theta)]
+#             AAT_jj[1] = [np.dot(a1, dv1j_phi) * np.dot(a1, dv1j_theta), np.dot(a1, dv1j_phi)**2.]
+#
+#             # Same for ii, jj, and ij terms
+#             # Torsion Derviatives a1 & b1
+#             AAT_ij = np.full((2, 2), 0.0)
+#             AAT_ij[0] = [np.dot(a1, dv1j_theta) * np.dot(b1, dv1i_theta), np.dot(a1, dv1j_phi) * np.dot(b1, dv1i_theta)]
+#             AAT_ij[1] = [np.dot(a1, dv1j_theta) * np.dot(b1, dv1i_phi), np.dot(a1, dv1j_phi) * np.dot(b1, dv1i_phi)]
+#             # Just missing kt term now
+#
+#             # Torsion Derivatives ai, b1 for Hji
+#             AAT_ji = np.matrix.transpose(AAT_ij)
+#             # AAT_ji = AAT_ij
+#
+#             # Torsion Derviatives a3 & b3
+#             AA3T_ij = np.full((2, 2), 0.0)
+#             AA3T_ij[0] = [np.dot(a3, dv3j_theta) * np.dot(b3, dv3i_theta), np.dot(a3, dv3j_phi) * np.dot(b3, dv3i_theta)]
+#             AA3T_ij[1] = [np.dot(a3, dv3j_theta) * np.dot(b3, dv3i_phi), np.dot(a3, dv3j_phi) * np.dot(b3, dv3i_phi)]
+#             # just missing kt term now
+#
+#             # Torsion Derivatives a3, b3 for Hji
+#             AA3T_ji = np.matrix.transpose(AA3T_ij)
+#             # AA3T_ji = AA3T_ij
+#
+#             # Hii Angle to Angle torsion Terms a3 & b3
+#             AA3T_ii = np.full((2, 2), 0.0)
+#             AA3T_ii[0] = [np.dot(b3, dv3i_theta) ** 2., np.dot(b3, dv3i_phi) * np.dot(b3, dv3i_theta)]
+#             AA3T_ii[1] = [np.dot(b3, dv3i_phi) * np.dot(b3, dv3i_theta), np.dot(b3, dv3i_phi) ** 2.]
+#
+#             # Hjj Angle to Angle torsion Terms a3& b3
+#             AA3T_jj = np.full((2, 2), 0.0)
+#             AA3T_jj[0] = [np.dot(a3, dv3j_theta) ** 2., np.dot(a3, dv3j_phi) * np.dot(a3, dv3j_theta)]
+#             AA3T_jj[1] = [np.dot(a3, dv3j_phi) * np.dot(a3, dv3j_theta), np.dot(a3, dv3j_phi) ** 2.]
+#
+#             #All derivatives Calculated, Now just Fill Hij
+#             subHij = np.full((7, 7), 0.0)
+#             subHij[0:3, 0:3] = -dir * kb
+#             subHij[0:3, 3:5] = kb * PA_ij
+#             subHij[3:5, 0:3] = kb * AP_ij
+#             subHij[3:5, 3:5] = kt * AAT_ij
+#             subHij[5:7, 5:7] = kt * AA3T_ij
+#
+#             #Hji
+#             subHji = np.full((7, 7), 0.0)
+#             subHji[0:3, 0:3] = -dir * kb
+#             subHji[0:3, 3:5] = kb * PA_ji
+#             subHji[3:5, 0:3] = kb * AP_ji
+#             subHji[3:5, 3:5] = kt * AAT_ji
+#             subHji[5:7, 5:7] = kt * AA3T_ji
+#
+#             #Fill Hii
+#             subHii = np.full((7, 7), 0.0)
+#             subHii[0:3, 0:3] = dir * kb
+#             subHii[0:3, 3:5] = kb * PA_ii
+#             subHii[3:5, 0:3] = kb * AP_ii
+#             subHii[3:5, 3:5] = kt * AAT_ii + kb * AAB_ii
+#             subHii[5:7, 5:7] = kt * AA3T_ii
+#
+#             #Fill Hjj
+#             subHjj = np.full((7, 7), 0.0)
+#             subHjj[0:3, 0:3] = dir * kb
+#             subHjj[0:3, 3:5] = kb * PA_jj
+#             subHjj[3:5, 0:3] = kb * AP_jj
+#             subHjj[3:5, 3:5] = kt * AAT_jj + kb * AAB_jj
+#             subHjj[5:7, 5:7] = kt * AA3T_jj
+#
+#             #Fill Actual Matrix
+#             bend_hess[7 * i:7 * i + 7, 7 * j:7 * j + 7] += subHij
+#             bend_hess[7 * j:7 * j + 7, 7 * i:7 * i + 7] += subHji
+#             bend_hess[7 * i:7 * i + 7, 7 * i:7 * i + 7] += subHii
+#             bend_hess[7 * j:7 * j + 7, 7 * j:7 * j + 7] += subHjj
+#
+#         return bend_hess
+#
+#     def total_hess(self, bend_hess, spring_hess, ks=1):
+#         for i in range(self.cc):
+#             for j in range(self.cc):
+#                 bend_hess[7*i:7*i+3, 7*j:7*j+3] += spring_hess[3*i:3*i+3, 3*j:3*j+3]*ks
+#         return bend_hess
+#
+#     def calc_bfacts(self, inversehess):
+#         msd = []
+#         for i in range(self.cc):
+#             print(inversehess[7*i:7*i+3, 7*i:7*i+3])
+#             msd.append(self.kb*self.T*np.sum(np.diag(inversehess[7*i:7*i+3, 7*i:7*i+3])))
+#             #this ain't it
+#             # msd.append(self.kb*self.T*np.sum(np.diag(inversehess[7*i:7*i+7, 7*i:7*i+7])))
+#         ana_bfactors = [self.bconv * x for x in msd]
+#
+#         return ana_bfactors
 
 
+#Known Issues: Will not converge if under-constrained residues present, will have to raise cutoff value
 class HANM(ANM):
     def __init__(self, coord, exp_bfactors, cutoff=15, T=300, scale_factor=0.3, mcycles=5, ncycles=7):
         super().__init__(coord, exp_bfactors, T=T, cutoff=cutoff)
@@ -1059,14 +1147,16 @@ def find_nearest(array,value):
 s=' '
 n='\n'
 
+
+#Giant File Writer
 class protein:
-    def __init__(self, pdbfile, cutoff=15, pottype='s', potential=5.0, offset_indx=0, strand_offset=0,
-                 diff_chains=True, import_sc=False, spring_constant_matrix=[], multimodel=False, Angle_Constraint=False, a1s=[], a3s=[]):
+    def __init__(self, pdbfile, cutoff=15, pottype='s', potential=5.0, offset_indx=0, strand_offset=0, backbone_weight=0,
+                 importscmatrix=False, scmatrix=0, angconstrain=False, upstreamdir=''):
         self.su = 8.518
         self.boxsize = 0
-        self.diff_chains = diff_chains
         self.pi = 0
-        self.multimodel = multimodel
+        self.backbone_weight = backbone_weight
+        self.angconstrain = angconstrain
 
         if "/" in pdbfile:
             pdbid = pdbfile.rsplit('/', 1)[1].split('.')[0]
@@ -1075,25 +1165,20 @@ class protein:
 
         wdir = os.getcwd()
         # Outfiles they go into directory you call script from
-        self.parfile = wdir + os.path.join('/generated.par')
-        self.topfile = wdir + os.path.join('/generated.top')
-        self.datfile = wdir + os.path.join('/generated.dat')
+        self.parfile = wdir + os.path.join(upstreamdir + '/generated.par')
+        self.topfile = wdir + os.path.join(upstreamdir + '/generated.top')
+        self.datfile = wdir + os.path.join(upstreamdir + '/generated.dat')
 
         self.sim_force_const = .05709
         self.pottype = pottype
-        self.import_sc = import_sc
+        self.import_sc = importscmatrix
 
-        if import_sc:
-            self.spring_constant_matrix = spring_constant_matrix
+        if importscmatrix:
+            self.spring_constant_matrix = scmatrix
             self.potential = 0.
         else:
             self.spring_constant_matrix = []
             self.potential = potential
-
-        if Angle_Constraint:
-            self.orientations = True
-            self.a1s = a1s
-            self.a3s = a3s
 
         self.rc = cutoff
         self.topbonds = []
@@ -1106,6 +1191,8 @@ class protein:
                      'PHE': 'F', 'ASN': 'N', 'GLY': 'G', 'HIS': 'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W', 'ALA': 'A',
                      'VAL': 'V', 'GLU': 'E', 'TYR': 'Y', 'MET': 'M'}
 
+        self.a1s = []
+        self.a3s = []
         self.getalphacarbons(pdbid, pdbfile)
 
     def three_to_one_seq(self, res):
@@ -1121,9 +1208,10 @@ class protein:
 
     def getalphacarbons(self, pdbid, pdbfile):
         structure = Bio.PDB.PDBParser().get_structure(pdbid, pdbfile)
-        model = structure[0]
-        if self.multimodel:
-            model = Bio.PDB.Selection.unfold_entities(structure, 'C')
+        model = Bio.PDB.Selection.unfold_entities(structure, 'C')
+
+        # orientation vector container
+        tmp_N_vectors = []
         # chain index, residue index, residue identitiy, CA coordinates
         cindx, rindx, rids, coord = [], [], [], []
         if len(model) == 1:
@@ -1136,6 +1224,9 @@ class protein:
                 if tags[3][0] == " ":
                     onelettercode = self.three_to_one_seq(residue.get_resname())
                     atoms = residue.get_atoms()
+                    # Center of Mass Used for orientations
+                    com = np.full(3, 0.0)
+                    count = 0
                     for atom in atoms:
                         if atom.get_id() == 'CA':
                             coordinates = atom.get_coord()
@@ -1143,9 +1234,56 @@ class protein:
                             rindx.append(rid)
                             rids.append(onelettercode)
                             coord.append(coordinates)
+                        if atom.get_id() != 'N' or atom.get_id() != 'C' or atom.get_id() != 'O':
+                            count += 1
+                            com += atom.get_coord()
+                    if np.sum(com) != 0.:
+                        com /= count
+                        # Vector from CA coordinates to Center of Mass
+                        nvec = normalize_vector(com - coord[-1])
+                        tmp_N_vectors.append(nvec)
+                    else:
+                        tmp_N_vectors.append(np.asarray([0., 0., 0.]))
         self.topology = zip(cindx, rindx, rids)
         acs = np.divide(np.array(coord), self.su)
         self.coord = acs
+
+        # Dealing with Null Normal Vectors
+        normal_vectors = []
+        fcoord = np.asarray(flatten(self.coord))
+        for iid, i in enumerate(tmp_N_vectors):
+            if np.sum(i ** 2) == 0.:
+                # vector from particle i to i + 1
+                rij = fcoord[iid + 1] - fcoord[iid]
+                # vector from particle i to i-1
+                rih = fcoord[iid - 1] - fcoord[iid]
+                nvec = normalize_vector(np.cross(rij, rih))
+                normal_vectors.append(nvec)
+            else:
+                nvec = normalize_vector(i)
+                normal_vectors.append(nvec)
+        normal_vectors = np.asarray(normal_vectors)
+
+        #Calculated a1 vectors
+        self.a1s = normal_vectors
+
+        #Calc a3 vectors
+        basis_vecs = np.asarray([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+        # Threshold to declare whether vector is perpendicular or parallel
+        epsilon = 1e-3
+        tmp_orth_vectors = []
+        for a1 in self.a1s:
+            if np.linalg.norm(a1) != 1.:
+                a1 = normalize_vector(a1)
+            # check if parallel to 1st basis vector
+            if not (np.dot(a1, basis_vecs[0]) > 1 - epsilon):
+                a3 = np.cross(a1, basis_vecs[0])
+            elif not (np.dot(a1, basis_vecs[1]) > 1 - epsilon):
+                a3 = np.cross(a1, basis_vecs[1])
+            # Arbitrarily Defined Just needs to be perpendicular
+            tmp_orth_vectors.append(a3)
+        self.a3s = np.asarray(tmp_orth_vectors)
+
 
     def WriteParFile_custombonds(self, bondlist, potential=5.0):
         make = open(self.parfile, 'w')
@@ -1154,12 +1292,12 @@ class protein:
         make.write(n)
         make.close()
         p = open(self.parfile, "a")
-        custom_potentials  = len(bondlist[0]) > 2
+        custom_potentials = len(bondlist[0]) > 2
         ordered = sorted(bondlist, key=lambda tup: (tup[0], tup[1]))
 
         if custom_potentials:
             for bond in ordered:
-                i, j, p = bond
+                i, j, po = bond
                 if j-i == 1:
                     dx = self.coord[j, 0] - self.coord[i, 0]
                     dy = self.coord[j, 1] - self.coord[i, 1]
@@ -1167,7 +1305,7 @@ class protein:
                     dist = math.sqrt(abs(dx) ** 2 + abs(dy) ** 2 + abs(dz) ** 2)
                     r = np.asarray([dx / dist, dy / dist, dz / dist])
                     a0, b0, c0, d0 = np.dot(self.a1s[i], r), np.dot(self.a1s[j], -1. * r), np.dot(self.a1s[i], self.a1s[j]), np.dot(self.a3s[i], self.a3s[j])
-                    print(i + self.offset_indx, j + self.offset_indx, dist, 's', p,
+                    print(i + self.offset_indx, j + self.offset_indx, dist, 's', po+self.backbone_weight,
                           a0, b0, c0, d0,
                           file=p)
                 else:
@@ -1189,7 +1327,7 @@ class protein:
                     a0, b0, c0, d0 = np.dot(self.a1s[i], r), np.dot(self.a1s[j], -1. * r), np.dot(self.a1s[i],
                                                                                                   self.a1s[j]), np.dot(
                         self.a3s[i], self.a3s[j])
-                    print(i + self.offset_indx, j + self.offset_indx, dist, 's', potential,
+                    print(i + self.offset_indx, j + self.offset_indx, dist, 's', potential + self.backbone_weight,
                           a0, b0, c0, d0,
                           file=p)
                 else:
@@ -1206,8 +1344,8 @@ class protein:
     def WriteParFile(self, pottype='s', potential=5.0):
         make = open(self.parfile, 'w')
         self.pi = len(self.coord)  # Particle Index for range operations
-        print(self.coord.shape, len(self.coord))
-        print(self.pi)
+        #print(self.coord.shape, len(self.coord))
+        print('N = ', self.pi)
         make.write(str(len(self.coord)))
         make.write(n)
         make.close()
@@ -1226,7 +1364,7 @@ class protein:
                             self.topbonds.append((i, j))
                             if abs(i - j) == 1:
                                 if self.import_sc:
-                                    if self.orientations:
+                                    if self.angconstrain:
                                         r = np.asarray([dx/dist, dy/dist, dz/dist])
                                         a0, b0, c0, d0 = np.dot(self.a1s[i], r), np.dot(self.a1s[j], -1.*r), np.dot(self.a1s[i], self.a1s[j]), np.dot(self.a3s[i], self.a3s[j])
                                         spring_constant = self.spring_constant_matrix[i, j] / self.sim_force_const
@@ -1238,7 +1376,7 @@ class protein:
                                         print(i + self.offset_indx, j + self.offset_indx, dist, self.pottype, spring_constant,
                                               file=p)
                                 else:
-                                    if self.orientations:
+                                    if self.angconstrain:
                                         r = np.asarray([dx/dist, dy/dist, dz/dist])
                                         a0, b0, c0, d0 = np.dot(self.a1s[i], r), np.dot(self.a1s[j], -1.*r), np.dot(self.a1s[i], self.a1s[j]), np.dot(self.a3s[i], self.a3s[j])
                                         print(i + self.offset_indx, j + self.offset_indx, dist, self.pottype, self.potential,
@@ -1274,16 +1412,10 @@ class protein:
         print('t = 0', file=conf)
         print("b =", str(self.boxsize), str(self.boxsize), str(self.boxsize), file=conf)
         print("E =", 0, 0, 0, file=conf)
-        if self.orientations:
-            for i in range(0, self.pi):
-                print(self.coord[i, 0], self.coord[i, 1], self.coord[i, 2], ' '.join(map(str, self.a1s[i])), ' '.join(map(str, self.a3s[i])), 0.0, 0.0,
-                      0.0, 0.0, 0.0, 0.0, file=conf)
-            conf.close()
-        else:
-            for i in range(0, self.pi):
-                print(self.coord[i, 0], self.coord[i, 1], self.coord[i, 2], 1.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0,
-                      0.0, 0.0, 0.0, file=conf)
-            conf.close()
+        for i in range(0, self.pi):
+            print(self.coord[i, 0], self.coord[i, 1], self.coord[i, 2], ' '.join(map(str, self.a1s[i])), ' '.join(map(str, self.a3s[i])), 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, file=conf)
+        conf.close()
 
     def WriteTopFile(self):
         cindx, rindx, rids = zip(*self.topology)
@@ -1292,10 +1424,7 @@ class protein:
         t_pri = [x - 1 for x in t_aft]
 
         t = open(self.topfile, 'w')
-        if self.diff_chains:
-            print(self.pi, len(t_aft) + 1, file=t)
-        else:
-            print(self.pi, 1, file=t)
+        print(self.pi, len(t_aft) + 1, file=t)
         if self.pottype == 's':
             # Get bonds
             fullneighs = []
@@ -1308,15 +1437,12 @@ class protein:
                 nebs_adj = [x + self.offset_indx for x in nebs]
                 fullneighs.append(nebs_adj)
 
-            if not self.diff_chains:
-                t_aft, t_pri = [], []
-                cindx = [cindx[0] for x in cindx]
             for cid, i in enumerate(cindx):
                 ci_adj = -1 * (i + self.strand_offset + 1)
                 rindx_adj = cid + self.offset_indx
                 olc = rids[cid]
                 bonds = fullneighs[cid]
-                print(bonds)
+                #print(bonds)
                 if self.pottype == 's':
                     if cid == self.pi - 1 or cid in t_pri:
                         print(ci_adj, olc, rindx_adj - 1, -1, *bonds, file=t)
@@ -1328,22 +1454,28 @@ class protein:
 
     def WriteSimFiles(self):
         self.WriteParFile()
+        print('Wrote Par File to', self.parfile)
         self.WriteConfFile()
+        print('Wrote Configuration (dat) File to', self.datfile)
         self.WriteTopFile()
+        print('Wrote Topology File to', self.topfile)
 
 
 
-def export_to_simulation(model, pdbfile, multimodel=False):
+def export_to_simulation(model, pdbfile, upstreamdir = ''):
     if model.model_id == 'ANM':
-        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma, multimodel=multimodel)
+        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma/0.05709, upstreamdir=upstreamdir)
         p.WriteSimFiles()
     elif model.model_id == 'HANM' or model.model_id == 'MVP' or model.model_id == 'mANM':
-        p = protein(pdbfile, cutoff=model.cutoff, import_sc=True, spring_constant_matrix=model.spring_constant_matrix, multimodel=multimodel)
+        p = protein(pdbfile, cutoff=model.cutoff, importscmatrix=True, scmatrix=model.spring_constant_matrix, upstreamdir=upstreamdir)
         p.WriteSimFiles()
     elif model.model_id == 'pep':
-        p = protein(pdbfile, cutoff=0, potential=0, Angle_Constraint=True, a1s=model.a1s, a3s=model.a3s)
+        p = protein(pdbfile, cutoff=0, potential=0, angconstrain=True, backbone_weight=model.backbone_weight, upstreamdir=upstreamdir)
         p.WriteParFile_custombonds(model.bonds, potential=model.potential)
         p.WriteConfFile()
         p.WriteTopFile()
+    elif model.model_id == 'ANMT':
+        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma/0.05709, angconstrain=True, upstreamdir=upstreamdir)
+        p.WriteSimFiles()
     else:
         print('Model Type', model.model_id, 'is not supported')
